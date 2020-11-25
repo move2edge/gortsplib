@@ -161,7 +161,13 @@ func (c *ConnClient) backgroundPlayTCP(onFrameDone chan error) {
 				return
 			}
 
-			c.rtcpReceivers[frame.TrackId].OnFrame(frame.StreamType, frame.Content)
+			recv, ok := c.rtcpReceivers[frame.TrackId]
+			if !ok {
+				readerDone <- fmt.Errorf("invalid track id: %v", frame.TrackId)
+				return
+			}
+
+			recv.OnFrame(frame.StreamType, frame.Content)
 
 			c.readCB(frame.TrackId, frame.StreamType, frame.Content)
 		}
