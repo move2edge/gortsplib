@@ -29,8 +29,8 @@ import (
 const (
 	clientConnReadBufferSize       = 4096
 	clientConnWriteBufferSize      = 4096
-	clientConnReceiverReportPeriod = 10 * time.Second
-	clientConnSenderReportPeriod   = 10 * time.Second
+	clientConnReceiverReportPeriod = 5 * time.Second
+	clientConnSenderReportPeriod   = 5 * time.Second
 	clientConnUDPCheckStreamPeriod = 5 * time.Second
 	clientConnUDPKeepalivePeriod   = 30 * time.Second
 )

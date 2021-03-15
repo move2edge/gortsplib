@@ -115,7 +115,7 @@ type ServerConnReadHandlers struct {
 	OnTeardown func(req *base.Request) (*base.Response, error)
 
 	// called after receiving a frame.
-	OnFrame func(trackID int, streamType StreamType, payload []byte)
+	OnFrame func(trackID int, streamType StreamType, payload []byte, stamp time.Time)
 }
 
 // ServerConn is a server-side RTSP connection.
@@ -861,11 +861,12 @@ outer:
 			case *base.InterleavedFrame:
 				// forward frame only if it has been set up
 				if _, ok := sc.tracks[frame.TrackID]; ok {
+          stamp := time.Now()
 					if sc.state == ServerConnStateRecord {
-						sc.announcedTracks[frame.TrackID].rtcpReceiver.ProcessFrame(time.Now(),
+						sc.announcedTracks[frame.TrackID].rtcpReceiver.ProcessFrame(stamp,
 							frame.StreamType, frame.Payload)
 					}
-					sc.readHandlers.OnFrame(frame.TrackID, frame.StreamType, frame.Payload)
+					sc.readHandlers.OnFrame(frame.TrackID, frame.StreamType, frame.Payload, stamp)
 				}
 
 			case *base.Request:
