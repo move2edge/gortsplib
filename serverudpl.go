@@ -8,6 +8,8 @@ import (
 
 	"github.com/aler9/gortsplib/pkg/multibuffer"
 	"github.com/aler9/gortsplib/pkg/ringbuffer"
+	"github.com/aler9/gortsplib/pkg/conntrack"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -116,10 +118,26 @@ func (s *serverUDPListener) run() {
 				clientAddr.fill(addr.IP, addr.Port)
 				clientData, ok := s.clients[clientAddr]
 				if !ok {
-					return
+					realPort, err := conntrack.ConntrackFindRealSourcePort(addr.Port)
+					if err == nil {
+						clientAddr.fill(addr.IP, realPort)
+						clientData, ok = s.clients[clientAddr]
+						if ok {
+							clientAddr.fill(addr.IP, addr.Port)
+							log.Infoln("Conntrack remap", addr.IP, addr.Port, realPort)
+							s.clients[clientAddr] = clientData
+							clientAddr.fill(addr.IP, realPort)
+							delete(s.clients, clientAddr)
+						} else {
+							return
+						}
+					} else {
+						log.Infoln("Error not found in conntrack!")
+						return
+					}
 				}
 
-        now := time.Now()
+				now := time.Now()
 				if clientData.isPublishing {
 					atomic.StoreInt64(clientData.sc.announcedTracks[clientData.trackID].udpLastFrameTime, now.Unix())
 					clientData.sc.announcedTracks[clientData.trackID].rtcpReceiver.ProcessFrame(now, s.streamType, buf[:n])
