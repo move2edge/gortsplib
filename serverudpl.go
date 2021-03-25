@@ -1,6 +1,7 @@
 package gortsplib
 
 import (
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -8,7 +9,6 @@ import (
 
 	"github.com/aler9/gortsplib/pkg/multibuffer"
 	"github.com/aler9/gortsplib/pkg/ringbuffer"
-	"github.com/aler9/gortsplib/pkg/conntrack"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -25,6 +25,7 @@ type clientData struct {
 	sc           *ServerConn
 	trackID      int
 	isPublishing bool
+	streamType   StreamType
 }
 
 type clientAddr struct {
@@ -94,6 +95,54 @@ func (s *serverUDPListener) close() {
 	<-s.done
 }
 
+func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, addr *net.UDPAddr) (*clientData, error) {
+	var clientData *clientData
+	for address, client := range s.clients {
+		if client.isPublishing == isPubliser && client.streamType == streamType {
+			var track ServerConnTrack
+			log.Debugln(">>", address, client)
+			if streamType == StreamTypeRTP {
+				track.rtpPort = addr.Port
+				track.rtcpPort = client.sc.tracks[client.trackID].rtcpPort
+			} else {
+				track.rtpPort = client.sc.tracks[client.trackID].rtpPort
+				track.rtcpPort = addr.Port
+			}
+			client.sc.tracks[client.trackID] = track
+			clientData = client
+			delete(s.clients, address)
+			var clientAddr clientAddr
+			clientAddr.fill(addr.IP, addr.Port)
+			s.clients[clientAddr] = clientData
+			return clientData, nil
+		}
+	}
+	log.Errorln("Not found in address table")
+	return nil, errors.New("Not found in address table")
+}
+
+func (s *serverUDPListener) handleNat(n int, addr *net.UDPAddr, buf []byte) (*clientData, error) {
+	var clientData *clientData
+	var err error = nil
+	log.Debugln("Unknown frame", addr.IP, addr.Port, n, buf[:8], s.streamType)
+	if buf[1] == 200 {
+		log.Infoln("Server RTCP", addr.IP, addr.Port)
+		clientData, err = s.updatePorts(true, s.streamType, addr)
+	} else if buf[1] == 201 {
+		log.Infoln("Client RTCP", addr.IP, addr.Port)
+		clientData, err = s.updatePorts(false, s.streamType, addr)
+	} else if buf[1] == 0 {
+		log.Infoln("Client RTP", addr.IP, addr.Port)
+		clientData, err = s.updatePorts(false, s.streamType, addr)
+	} else if buf[1] == 224 {
+		log.Infoln("Server RTP", addr.IP, addr.Port)
+		clientData, err = s.updatePorts(true, s.streamType, addr)
+	} else {
+		log.Debugln("Unknown type of frame, dropping connection")
+  }
+	return clientData, err
+}
+
 func (s *serverUDPListener) run() {
 	defer close(s.done)
 
@@ -118,21 +167,8 @@ func (s *serverUDPListener) run() {
 				clientAddr.fill(addr.IP, addr.Port)
 				clientData, ok := s.clients[clientAddr]
 				if !ok {
-					realPort, err := conntrack.ConntrackFindRealSourcePort(addr.Port)
-					if err == nil {
-						clientAddr.fill(addr.IP, realPort)
-						clientData, ok = s.clients[clientAddr]
-						if ok {
-							clientAddr.fill(addr.IP, addr.Port)
-							log.Infoln("Conntrack remap", addr.IP, addr.Port, realPort)
-							s.clients[clientAddr] = clientData
-							clientAddr.fill(addr.IP, realPort)
-							delete(s.clients, clientAddr)
-						} else {
-							return
-						}
-					} else {
-						log.Infoln("Error not found in conntrack!")
+					clientData, err = s.handleNat(n, addr, buf)
+					if err != nil {
 						return
 					}
 				}
@@ -181,11 +217,12 @@ func (s *serverUDPListener) addClient(ip net.IP, port int, sc *ServerConn, track
 
 	var addr clientAddr
 	addr.fill(ip, port)
-
+	log.Debugln(">>>> add", addr)
 	s.clients[addr] = &clientData{
 		sc:           sc,
 		trackID:      trackID,
 		isPublishing: isPublishing,
+		streamType:   s.streamType,
 	}
 }
 
@@ -195,6 +232,6 @@ func (s *serverUDPListener) removeClient(ip net.IP, port int) {
 
 	var addr clientAddr
 	addr.fill(ip, port)
-
+	log.Debugln(">>>> remove", addr)
 	delete(s.clients, addr)
 }

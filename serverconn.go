@@ -253,13 +253,14 @@ func (sc *ServerConn) zone() string {
 
 func (sc *ServerConn) frameModeEnable() {
 	switch sc.state {
-	case ServerConnStatePlay:
+	case ServerConnStatePrePlay:
 		if *sc.streamProtocol == StreamProtocolTCP {
 			sc.doEnableFrames = true
 		} else {
 			// readers can send RTCP frames, they cannot sent RTP frames
 			for trackID, track := range sc.tracks {
 				sc.udpRTCPListener.addClient(sc.ip(), track.rtcpPort, sc, trackID, false)
+				sc.udpRTPListener.addClient(sc.ip(), track.rtpPort, sc, trackID, false)
 			}
 		}
 
@@ -298,6 +299,7 @@ func (sc *ServerConn) frameModeDisable() {
 		} else {
 			for _, track := range sc.tracks {
 				sc.udpRTCPListener.removeClient(sc.ip(), track.rtcpPort)
+				sc.udpRTPListener.removeClient(sc.ip(), track.rtpPort)
 			}
 		}
 
@@ -634,6 +636,7 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 			switch sc.state {
 			case ServerConnStateInitial:
 				sc.state = ServerConnStatePrePlay
+        sc.frameModeEnable()
 			}
 
 			// workaround to prevent a bug in rtspclientsink
@@ -676,7 +679,6 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 
 			if res.StatusCode == 200 && sc.state != ServerConnStatePlay {
 				sc.state = ServerConnStatePlay
-				sc.frameModeEnable()
 			}
 
 			return res, err
