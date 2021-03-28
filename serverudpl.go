@@ -26,6 +26,7 @@ type clientData struct {
 	trackID      int
 	isPublishing bool
 	streamType   StreamType
+	natMapped    bool
 }
 
 type clientAddr struct {
@@ -98,7 +99,7 @@ func (s *serverUDPListener) close() {
 func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, addr *net.UDPAddr) (*clientData, error) {
 	var clientData *clientData
 	for address, client := range s.clients {
-		if client.isPublishing == isPubliser && client.streamType == streamType {
+		if client.isPublishing == isPubliser && client.streamType == streamType && client.natMapped == false{
 			var track ServerConnTrack
 			log.Debugln(">>", address, client)
 			if streamType == StreamTypeRTP {
@@ -109,6 +110,7 @@ func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, 
 				track.rtcpPort = addr.Port
 			}
 			client.sc.tracks[client.trackID] = track
+      client.natMapped = true
 			clientData = client
 			delete(s.clients, address)
 			var clientAddr clientAddr
@@ -139,7 +141,7 @@ func (s *serverUDPListener) handleNat(n int, addr *net.UDPAddr, buf []byte) (*cl
 		clientData, err = s.updatePorts(true, s.streamType, addr)
 	} else {
 		log.Debugln("Unknown type of frame, dropping connection")
-  }
+	}
 	return clientData, err
 }
 
@@ -223,6 +225,7 @@ func (s *serverUDPListener) addClient(ip net.IP, port int, sc *ServerConn, track
 		trackID:      trackID,
 		isPublishing: isPublishing,
 		streamType:   s.streamType,
+		natMapped:    false,
 	}
 }
 
