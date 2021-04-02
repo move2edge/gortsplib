@@ -1,6 +1,7 @@
 package gortsplib
 
 import (
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/aler9/gortsplib/pkg/multibuffer"
 	"github.com/aler9/gortsplib/pkg/ringbuffer"
+	log "github.com/sirupsen/logrus"
 )
 
 const (
@@ -23,6 +25,8 @@ type clientData struct {
 	sc           *ServerConn
 	trackID      int
 	isPublishing bool
+	streamType   StreamType
+	natMapped    bool
 }
 
 type clientAddr struct {
@@ -39,6 +43,55 @@ func (p *clientAddr) fill(ip net.IP, port int) {
 	} else {
 		copy(p.ip[:], ip)
 	}
+}
+
+func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, addr *net.UDPAddr) (*clientData, error) {
+	var clientData *clientData
+	for address, client := range s.clients {
+		if client.isPublishing == isPubliser && client.streamType == streamType && client.natMapped == false {
+			var track ServerConnSetuppedTrack
+			log.Debugln(">>", address, client)
+			if streamType == StreamTypeRTP {
+				track.udpRTPPort = addr.Port
+				track.udpRTCPPort = client.sc.setuppedTracks[client.trackID].udpRTCPPort
+			} else {
+				track.udpRTPPort = client.sc.setuppedTracks[client.trackID].udpRTPPort
+				track.udpRTCPPort = addr.Port
+			}
+			client.sc.setuppedTracks[client.trackID] = track
+      client.natMapped = true
+			clientData = client
+			delete(s.clients, address)
+			var clientAddr clientAddr
+			clientAddr.fill(addr.IP, addr.Port)
+			s.clients[clientAddr] = clientData
+			return clientData, nil
+		}
+	}
+	log.Errorln("Not found in address table")
+	return nil, errors.New("Not found in address table")
+}
+
+func (s *serverUDPListener) handleNat(n int, addr *net.UDPAddr, buf []byte) (*clientData, error) {
+	var clientData *clientData
+	var err error = nil
+	log.Debugln("Unknown frame", addr.IP, addr.Port, n, buf[:8], s.streamType)
+	if buf[1] == 200 {
+		log.Infoln("Server RTCP", addr.IP, addr.Port)
+		clientData, err = s.updatePorts(true, s.streamType, addr)
+	} else if buf[1] == 201 {
+		log.Infoln("Client RTCP", addr.IP, addr.Port)
+		clientData, err = s.updatePorts(false, s.streamType, addr)
+	} else if buf[1] == 0 {
+		log.Infoln("Client RTP", addr.IP, addr.Port)
+		clientData, err = s.updatePorts(false, s.streamType, addr)
+	} else if buf[1] == 224 {
+		log.Infoln("Server RTP", addr.IP, addr.Port)
+		clientData, err = s.updatePorts(true, s.streamType, addr)
+	} else {
+		log.Debugln("Unknown type of frame, dropping connection")
+	}
+	return clientData, err
 }
 
 type serverUDPListener struct {
@@ -116,16 +169,19 @@ func (s *serverUDPListener) run() {
 				clientAddr.fill(addr.IP, addr.Port)
 				clientData, ok := s.clients[clientAddr]
 				if !ok {
-					return
+					clientData, err = s.handleNat(n, addr, buf)
+					if err != nil {
+						return
+					}
 				}
 
+				now := time.Now()
 				if clientData.isPublishing {
-					now := time.Now()
 					atomic.StoreInt64(clientData.sc.announcedTracks[clientData.trackID].udpLastFrameTime, now.Unix())
 					clientData.sc.announcedTracks[clientData.trackID].rtcpReceiver.ProcessFrame(now, s.streamType, buf[:n])
 				}
 
-				clientData.sc.readHandlers.OnFrame(clientData.trackID, s.streamType, buf[:n])
+				clientData.sc.readHandlers.OnFrame(clientData.trackID, s.streamType, buf[:n], now)
 			}()
 		}
 	}()
@@ -168,6 +224,7 @@ func (s *serverUDPListener) addClient(ip net.IP, port int, sc *ServerConn, track
 		sc:           sc,
 		trackID:      trackID,
 		isPublishing: isPublishing,
+		natMapped:    false,
 	}
 }
 

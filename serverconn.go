@@ -244,7 +244,7 @@ type ServerConnReadHandlers struct {
 	OnTeardown func(ctx *ServerConnTeardownCtx) (*base.Response, error)
 
 	// called after receiving a frame.
-	OnFrame func(trackID int, streamType StreamType, payload []byte)
+  OnFrame func(trackID int, streamType StreamType, payload []byte, stamp time.Time)
 }
 
 // ServerConn is a server-side RTSP connection.
@@ -384,13 +384,14 @@ func (sc *ServerConn) zone() string {
 
 func (sc *ServerConn) frameModeEnable() {
 	switch sc.state {
-	case ServerConnStatePlay:
+	case ServerConnStatePrePlay:
 		if *sc.setupProtocol == StreamProtocolTCP {
 			sc.doEnableTCPFrame = true
 		} else {
 			// readers can send RTCP frames, they cannot sent RTP frames
 			for trackID, track := range sc.setuppedTracks {
 				sc.udpRTCPListener.addClient(sc.ip(), track.udpRTCPPort, sc, trackID, false)
+				sc.udpRTPListener.addClient(sc.ip(), track.udpRTCPPort, sc, trackID, false)
 			}
 		}
 
@@ -430,6 +431,7 @@ func (sc *ServerConn) frameModeDisable() {
 		} else {
 			for _, track := range sc.setuppedTracks {
 				sc.udpRTCPListener.removeClient(sc.ip(), track.udpRTCPPort)
+				sc.udpRTPListener.removeClient(sc.ip(), track.udpRTCPPort)
 			}
 		}
 
@@ -797,6 +799,7 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 				sc.state = ServerConnStatePrePlay
 				sc.setupPath = &path
 				sc.setupQuery = &query
+        sc.frameModeEnable()
 			}
 
 			// workaround to prevent a bug in rtspclientsink
@@ -853,7 +856,6 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 
 			if res.StatusCode == base.StatusOK && sc.state != ServerConnStatePlay {
 				sc.state = ServerConnStatePlay
-				sc.frameModeEnable()
 			}
 
 			return res, err
@@ -1103,11 +1105,12 @@ func (sc *ServerConn) backgroundRead() error {
 			case *base.InterleavedFrame:
 				// forward frame only if it has been set up
 				if _, ok := sc.setuppedTracks[frame.TrackID]; ok {
+          stamp := time.Now()
 					if sc.state == ServerConnStateRecord {
-						sc.announcedTracks[frame.TrackID].rtcpReceiver.ProcessFrame(time.Now(),
+            sc.announcedTracks[frame.TrackID].rtcpReceiver.ProcessFrame(stamp,
 							frame.StreamType, frame.Payload)
 					}
-					sc.readHandlers.OnFrame(frame.TrackID, frame.StreamType, frame.Payload)
+          sc.readHandlers.OnFrame(frame.TrackID, frame.StreamType, frame.Payload, stamp)
 				}
 
 			case *base.Request:
