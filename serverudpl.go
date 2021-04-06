@@ -26,7 +26,6 @@ type clientData struct {
 	trackID      int
 	isPublishing bool
 	streamType   StreamType
-	natMapped    bool
 }
 
 type clientAddr struct {
@@ -47,8 +46,10 @@ func (p *clientAddr) fill(ip net.IP, port int) {
 
 func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, addr *net.UDPAddr) (*clientData, error) {
 	var clientData *clientData
+	log.Debugln(s.port())
 	for address, client := range s.clients {
-		if client.isPublishing == isPubliser && client.streamType == streamType && client.natMapped == false {
+		log.Debugln(">>>", address, client)
+		if client.isPublishing == isPubliser && client.streamType == streamType {
 			var track ServerConnSetuppedTrack
 			log.Debugln(">>", address, client)
 			if streamType == StreamTypeRTP {
@@ -59,7 +60,6 @@ func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, 
 				track.udpRTCPPort = addr.Port
 			}
 			client.sc.setuppedTracks[client.trackID] = track
-      client.natMapped = true
 			clientData = client
 			delete(s.clients, address)
 			var clientAddr clientAddr
@@ -219,13 +219,15 @@ func (s *serverUDPListener) addClient(ip net.IP, port int, sc *ServerConn, track
 
 	var addr clientAddr
 	addr.fill(ip, port)
+	log.Debugln("add", addr)
 
 	s.clients[addr] = &clientData{
 		sc:           sc,
 		trackID:      trackID,
 		isPublishing: isPublishing,
-		natMapped:    false,
+		streamType:   s.streamType,
 	}
+	log.Debugln(">>>", s.clients)
 }
 
 func (s *serverUDPListener) removeClient(ip net.IP, port int) {
