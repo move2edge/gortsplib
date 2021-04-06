@@ -37,16 +37,18 @@ func main() {
 	// instantiate a decoder
 	dec := rtph264.NewDecoder()
 
-	// get H264 NALUs of that track
+	// read RTP frames
 	err = <-conn.ReadFrames(func(trackID int, typ gortsplib.StreamType, buf []byte) {
 		if trackID == h264Track {
-			nts, err := dec.Decode(buf)
+			// convert RTP frames into H264 NALUs
+			nalus, _, err := dec.Decode(buf)
 			if err != nil {
 				return
 			}
 
-			for _, nt := range nts {
-				fmt.Printf("received H264 NALU of size %d\n", len(nt.NALU))
+			// print NALUs
+			for _, nalu := range nalus {
+				fmt.Printf("received H264 NALU of size %d\n", len(nalu))
 			}
 		}
 	})

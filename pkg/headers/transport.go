@@ -99,12 +99,17 @@ func (h *Transport) Read(v base.HeaderValue) error {
 		return fmt.Errorf("value provided multiple times (%v)", v)
 	}
 
-	parts := strings.Split(v[0], ";")
-	if len(parts) == 0 {
-		return fmt.Errorf("invalid value (%v)", v)
+	v0 := v[0]
+
+	var part string
+	i := strings.IndexByte(v0, ';')
+	if i >= 0 {
+		part, v0 = v0[:i], v0[i+1:]
+	} else {
+		part, v0 = v0, ""
 	}
 
-	switch parts[0] {
+	switch part {
 	case "RTP/AVP", "RTP/AVP/UDP":
 		h.Protocol = base.StreamProtocolUDP
 
@@ -114,66 +119,78 @@ func (h *Transport) Read(v base.HeaderValue) error {
 	default:
 		return fmt.Errorf("invalid protocol (%v)", v)
 	}
-	parts = parts[1:]
 
-	switch parts[0] {
+	i = strings.IndexByte(v0, ';')
+	if i >= 0 {
+		part, v0 = v0[:i], v0[i+1:]
+	} else {
+		part, v0 = v0, ""
+	}
+
+	switch part {
 	case "unicast":
 		v := base.StreamDeliveryUnicast
 		h.Delivery = &v
-		parts = parts[1:]
 
 	case "multicast":
 		v := base.StreamDeliveryMulticast
 		h.Delivery = &v
-		parts = parts[1:]
 
-		// cast is optional, do not return any error
+	default:
+		// cast is optional, go back
+		v0 = part + ";" + v0
 	}
 
-	for _, t := range parts {
-		switch {
-		case strings.HasPrefix(t, "destination="):
-			v := t[len("destination="):]
+	kvs, err := keyValParse(v0, ';')
+	if err != nil {
+		return err
+	}
+
+	for k, rv := range kvs {
+		v := rv
+
+		switch k {
+		case "destination":
 			h.Destination = &v
 
-		case strings.HasPrefix(t, "ttl="):
-			v, err := strconv.ParseUint(t[len("ttl="):], 10, 64)
+		case "ttl":
+			tmp, err := strconv.ParseUint(v, 10, 64)
 			if err != nil {
 				return err
 			}
-			vu := uint(v)
+			vu := uint(tmp)
 			h.TTL = &vu
 
-		case strings.HasPrefix(t, "port="):
-			ports, err := parsePorts(t[len("port="):])
+		case "port":
+			ports, err := parsePorts(v)
 			if err != nil {
 				return err
 			}
 			h.Ports = ports
 
-		case strings.HasPrefix(t, "client_port="):
-			ports, err := parsePorts(t[len("client_port="):])
+		case "client_port":
+			ports, err := parsePorts(v)
 			if err != nil {
 				return err
 			}
 			h.ClientPorts = ports
 
-		case strings.HasPrefix(t, "server_port="):
-			ports, err := parsePorts(t[len("server_port="):])
+		case "server_port":
+			ports, err := parsePorts(v)
 			if err != nil {
 				return err
 			}
 			h.ServerPorts = ports
 
-		case strings.HasPrefix(t, "interleaved="):
-			ports, err := parsePorts(t[len("interleaved="):])
+		case "interleaved":
+			ports, err := parsePorts(v)
 			if err != nil {
 				return err
 			}
 			h.InterleavedIDs = ports
 
-		case strings.HasPrefix(t, "mode="):
-			str := strings.ToLower(t[len("mode="):])
+		case "mode":
+			str := strings.ToLower(v)
 			str = strings.TrimPrefix(str, "\"")
 			str = strings.TrimSuffix(str, "\"")
 
@@ -191,9 +208,10 @@ func (h *Transport) Read(v base.HeaderValue) error {
 			default:
 				return fmt.Errorf("invalid transport mode: '%s'", str)
 			}
-		}
 
-		// ignore non-standard keys
+		default:
+			// ignore non-standard keys
+		}
 	}
 
 	return nil

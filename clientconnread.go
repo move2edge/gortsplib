@@ -22,7 +22,7 @@ func (cc *ClientConn) Play() (*base.Response, error) {
 
 	res, err := cc.Do(&base.Request{
 		Method: base.Play,
-		URL:    cc.streamURL,
+		URL:    cc.streamBaseURL,
 	})
 	if err != nil {
 		return nil, err
@@ -119,13 +119,13 @@ func (cc *ClientConn) backgroundPlayUDP() error {
 			_, err := cc.Do(&base.Request{
 				Method: func() base.Method {
 					// the vlc integrated rtsp server requires GET_PARAMETER
-					if cc.getParameterSupported {
+					if cc.useGetParameter {
 						return base.GetParameter
 					}
 					return base.Options
 				}(),
-				// use the stream path, otherwise some cameras do not reply
-				URL:          cc.streamURL,
+				// use the stream base URL, otherwise some cameras do not reply
+				URL:          cc.streamBaseURL,
 				SkipResponse: true,
 			})
 			if err != nil {
@@ -159,19 +159,19 @@ func (cc *ClientConn) backgroundPlayUDP() error {
 
 				checkStreamInitial = false
 				checkStreamTicker.Stop()
-				checkStreamTicker = time.NewTicker(clientConnUDPCheckStreamPeriod)
+				checkStreamTicker = time.NewTicker(clientConnCheckStreamPeriod)
 
 			} else {
 				inTimeout := func() bool {
 					now := time.Now()
 					for _, cct := range cc.tracks {
-						lft := atomic.LoadInt64(cct.udpRTPListener.lastFrameTime)
-						if now.Sub(time.Unix(lft, 0)) < cc.conf.ReadTimeout {
+						lft := time.Unix(atomic.LoadInt64(cct.udpRTPListener.lastFrameTime), 0)
+						if now.Sub(lft) < cc.conf.ReadTimeout {
 							return false
 						}
 
-						lft = atomic.LoadInt64(cct.udpRTCPListener.lastFrameTime)
-						if now.Sub(time.Unix(lft, 0)) < cc.conf.ReadTimeout {
+						lft = time.Unix(atomic.LoadInt64(cct.udpRTCPListener.lastFrameTime), 0)
+						if now.Sub(lft) < cc.conf.ReadTimeout {
 							return false
 						}
 					}
@@ -191,6 +191,13 @@ func (cc *ClientConn) backgroundPlayUDP() error {
 }
 
 func (cc *ClientConn) backgroundPlayTCP() error {
+	// for some reason, SetReadDeadline() must always be called in the same
+	// goroutine, otherwise Read() freezes.
+	// therefore, we disable the deadline and perform check with a ticker.
+	cc.nconn.SetReadDeadline(time.Time{})
+
+	var lastFrameTime int64
+
 	readerDone := make(chan error)
 	go func() {
 		for {
@@ -203,7 +210,9 @@ func (cc *ClientConn) backgroundPlayTCP() error {
 				return
 			}
 
-			cc.tracks[frame.TrackID].rtcpReceiver.ProcessFrame(time.Now(), frame.StreamType, frame.Payload)
+			now := time.Now()
+			atomic.StoreInt64(&lastFrameTime, now.Unix())
+			cc.tracks[frame.TrackID].rtcpReceiver.ProcessFrame(now, frame.StreamType, frame.Payload)
 			cc.readCB(frame.TrackID, frame.StreamType, frame.Payload)
 		}
 	}()
@@ -211,17 +220,11 @@ func (cc *ClientConn) backgroundPlayTCP() error {
 	reportTicker := time.NewTicker(cc.conf.receiverReportPeriod)
 	defer reportTicker.Stop()
 
-	// for some reason, SetReadDeadline() must always be called in the same
-	// goroutine, otherwise Read() freezes.
-	// therefore, we call it with a ticker.
-	deadlineTicker := time.NewTicker(clientConnTCPSetDeadlinePeriod)
-	defer deadlineTicker.Stop()
+	checkStreamTicker := time.NewTicker(clientConnCheckStreamPeriod)
+	defer checkStreamTicker.Stop()
 
 	for {
 		select {
-		case <-deadlineTicker.C:
-			cc.nconn.SetReadDeadline(time.Now().Add(cc.conf.ReadTimeout))
-
 		case <-cc.backgroundTerminate:
 			cc.nconn.SetReadDeadline(time.Now())
 			<-readerDone
@@ -238,6 +241,18 @@ func (cc *ClientConn) backgroundPlayTCP() error {
 					Payload:    r,
 				}
 				frame.Write(cc.bw)
+			}
+
+		case <-checkStreamTicker.C:
+			inTimeout := func() bool {
+				now := time.Now()
+				lft := time.Unix(atomic.LoadInt64(&lastFrameTime), 0)
+				return now.Sub(lft) >= cc.conf.ReadTimeout
+			}()
+			if inTimeout {
+				cc.nconn.SetReadDeadline(time.Now())
+				<-readerDone
+				return liberrors.ErrClientTCPTimeout{}
 			}
 
 		case err := <-readerDone:

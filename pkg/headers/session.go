@@ -27,34 +27,37 @@ func (h *Session) Read(v base.HeaderValue) error {
 		return fmt.Errorf("value provided multiple times (%v)", v)
 	}
 
-	parts := strings.Split(v[0], ";")
-	if len(parts) == 0 {
-		return fmt.Errorf("invalid value (%v)", v)
+	v0 := v[0]
+
+	i := strings.IndexByte(v0, ';')
+	if i < 0 {
+		h.Session = v0
+		return nil
 	}
 
-	h.Session = parts[0]
+	h.Session = v0[:i]
+	v0 = v0[i+1:]
 
-	for _, part := range parts[1:] {
-		// remove leading spaces
-		part = strings.TrimLeft(part, " ")
+	v0 = strings.TrimLeft(v0, " ")
 
-		kv := strings.Split(part, "=")
-		if len(kv) != 2 {
-			return fmt.Errorf("invalid value")
+	kvs, err := keyValParse(v0, ';')
+	if err != nil {
+		return err
+	}
+
+	for k, v := range kvs {
+		switch k {
+		case "timeout":
+			iv, err := strconv.ParseUint(v, 10, 64)
+			if err != nil {
+				return err
+			}
+			uiv := uint(iv)
+			h.Timeout = &uiv
+
+		default:
+			// ignore non-standard keys
 		}
-
-		key, strValue := kv[0], kv[1]
-		if key != "timeout" {
-			return fmt.Errorf("invalid key '%s'", key)
-		}
-
-		iv, err := strconv.ParseUint(strValue, 10, 64)
-		if err != nil {
-			return err
-		}
-		uiv := uint(iv)
-
-		h.Timeout = &uiv
 	}
 
 	return nil

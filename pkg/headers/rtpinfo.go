@@ -28,16 +28,18 @@ func (h *RTPInfo) Read(v base.HeaderValue) error {
 		return fmt.Errorf("value provided multiple times (%v)", v)
 	}
 
-	for _, tmp := range strings.Split(v[0], ",") {
+	for _, part := range strings.Split(v[0], ",") {
 		e := &RTPInfoEntry{}
 
-		for _, kv := range strings.Split(tmp, ";") {
-			tmp := strings.SplitN(kv, "=", 2)
-			if len(tmp) != 2 {
-				return fmt.Errorf("unable to parse key-value (%v)", kv)
-			}
+		// remove leading spaces
+		part = strings.TrimLeft(part, " ")
 
-			k, v := tmp[0], tmp[1]
+		kvs, err := keyValParse(part, ';')
+		if err != nil {
+			return err
+		}
+
+		for k, v := range kvs {
 			switch k {
 			case "url":
 				e.URL = v
@@ -59,7 +61,7 @@ func (h *RTPInfo) Read(v base.HeaderValue) error {
 				e.Timestamp = &vi2
 
 			default:
-				return fmt.Errorf("invalid key: %v", k)
+				// ignore non-standard keys
 			}
 		}
 

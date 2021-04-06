@@ -10,7 +10,7 @@ import (
 	psdp "github.com/pion/sdp/v3"
 
 	"github.com/aler9/gortsplib/pkg/base"
-	"github.com/aler9/gortsplib/pkg/codecaac"
+	"github.com/aler9/gortsplib/pkg/rtpaac"
 	"github.com/aler9/gortsplib/pkg/sdp"
 )
 
@@ -127,7 +127,7 @@ func (t *Track) ExtractDataH264() ([]byte, []byte, error) {
 
 // NewTrackAAC initializes an AAC track from a configuration.
 func NewTrackAAC(payloadType uint8, config []byte) (*Track, error) {
-	var conf codecaac.MPEG4AudioConfig
+	var conf rtpaac.MPEG4AudioConfig
 	err := conf.Decode(config)
 	if err != nil {
 		return nil, fmt.Errorf("invalid MPEG-4 Audio config: %v", err)
@@ -306,8 +306,14 @@ func (t *Track) URL() (*base.URL, error) {
 	}
 
 	// control attribute contains a relative control attribute
-	ur := t.BaseURL.Clone()
-	ur.AddControlAttribute(controlAttr)
+	// insert the control attribute at the end of the url
+	// if there's a query, insert it after the query
+	// otherwise insert it after the path
+	strURL := t.BaseURL.String()
+	if controlAttr[0] != '?' && !strings.HasSuffix(strURL, "/") {
+		strURL += "/"
+	}
+	ur, _ := base.ParseURL(strURL + controlAttr)
 	return ur, nil
 }
 
