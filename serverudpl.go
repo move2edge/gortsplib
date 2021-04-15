@@ -48,7 +48,6 @@ func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, 
 	var clientData *clientData
 	log.Debugln(s.port())
 	for address, client := range s.clients {
-		log.Debugln(">>>", address, client)
 		if client.isPublishing == isPubliser && client.streamType == streamType {
 			var track ServerConnSetuppedTrack
 			log.Debugln(">>", address, client)
@@ -233,6 +232,7 @@ func (s *serverUDPListener) addClient(ip net.IP, port int, sc *ServerConn, track
 func (s *serverUDPListener) removeClient(ip net.IP, port int) {
 	s.clientsMutex.Lock()
 	defer s.clientsMutex.Unlock()
+	log.Debugln("rm", port)
 
 	var addr clientAddr
 	addr.fill(ip, port)

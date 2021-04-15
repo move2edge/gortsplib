@@ -391,7 +391,7 @@ func (sc *ServerConn) frameModeEnable() {
 			// readers can send RTCP frames, they cannot sent RTP frames
 			for trackID, track := range sc.setuppedTracks {
 				sc.udpRTCPListener.addClient(sc.ip(), track.udpRTCPPort, sc, trackID, false)
-				sc.udpRTPListener.addClient(sc.ip(), track.udpRTCPPort, sc, trackID, false)
+				sc.udpRTPListener.addClient(sc.ip(), track.udpRTPPort, sc, trackID, false)
 			}
 		}
 
@@ -431,7 +431,7 @@ func (sc *ServerConn) frameModeDisable() {
 		} else {
 			for _, track := range sc.setuppedTracks {
 				sc.udpRTCPListener.removeClient(sc.ip(), track.udpRTCPPort)
-				sc.udpRTPListener.removeClient(sc.ip(), track.udpRTCPPort)
+				sc.udpRTPListener.removeClient(sc.ip(), track.udpRTPPort)
 			}
 		}
 
