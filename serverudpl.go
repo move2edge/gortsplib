@@ -26,6 +26,7 @@ type clientData struct {
 	trackID      int
 	isPublishing bool
 	streamType   StreamType
+	isMapped   bool
 }
 
 type clientAddr struct {
@@ -48,7 +49,7 @@ func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, 
 	var clientData *clientData
 	log.Debugln(s.port())
 	for address, client := range s.clients {
-		if client.isPublishing == isPubliser && client.streamType == streamType {
+		if client.isPublishing == isPubliser && client.streamType == streamType && client.isMapped == false{
 			var track ServerConnSetuppedTrack
 			log.Debugln(">>", address, client)
 			if streamType == StreamTypeRTP {
@@ -64,6 +65,7 @@ func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, 
 			var clientAddr clientAddr
 			clientAddr.fill(addr.IP, addr.Port)
 			s.clients[clientAddr] = clientData
+      client.isMapped = true
 			return clientData, nil
 		}
 	}
@@ -225,6 +227,7 @@ func (s *serverUDPListener) addClient(ip net.IP, port int, sc *ServerConn, track
 		trackID:      trackID,
 		isPublishing: isPublishing,
 		streamType:   s.streamType,
+    isMapped: false,
 	}
 	log.Debugln(">>>", s.clients)
 }
