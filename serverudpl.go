@@ -2,6 +2,7 @@ package gortsplib
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/aler9/gortsplib/pkg/multibuffer"
 	"github.com/aler9/gortsplib/pkg/ringbuffer"
+	. "github.com/logrusorgru/aurora"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -26,12 +28,16 @@ type clientData struct {
 	trackID      int
 	isPublishing bool
 	streamType   StreamType
-	isMapped   bool
+	isMapped     bool
 }
 
 type clientAddr struct {
 	ip   [net.IPv6len]byte // use a fixed-size array to enable the equality operator
 	port int
+}
+
+func (s *serverUDPListener) LogInfo(msg ...interface{}) {
+	log.Info(Magenta(s.pc.LocalAddr())," ",fmt.Sprint(msg...))
 }
 
 func (p *clientAddr) fill(ip net.IP, port int) {
@@ -45,13 +51,47 @@ func (p *clientAddr) fill(ip net.IP, port int) {
 	}
 }
 
+func (s *serverUDPListener) printClientList(title string) {
+	mylog := fmt.Sprintln(Cyan("LIST "), title, ":")
+	mapStr := " "
+	var pubStr string
+	for address, client := range s.clients {
+		if client.isMapped {
+			mapStr = "M"
+		}
+		if client.isPublishing {
+			pubStr = Red("P").String()
+		} else {
+			pubStr = Green("C").String()
+		}
+		mylog = mylog + fmt.Sprintln("    ", pubStr, Blue(mapStr), address.ip[(len(address.ip)-4):], address.port)
+	}
+	s.LogInfo(mylog)
+}
+
+func (s *serverUDPListener) printMappingInfo(address clientAddr, client *clientData, incoming *net.UDPAddr) {
+	var oldPort int
+	var pubStr string
+	if client.isPublishing {
+		pubStr = "P"
+	} else {
+		pubStr = "C"
+	}
+	if client.streamType == StreamTypeRTP {
+		oldPort = client.sc.setuppedTracks[client.trackID].udpRTPPort
+	} else {
+		oldPort = client.sc.setuppedTracks[client.trackID].udpRTCPPort
+	}
+	s.LogInfo(Yellow("MAP:"), pubStr, client.streamType,
+		address.ip[(len(address.ip)-4):], oldPort, "->", incoming.IP, incoming.Port)
+}
+
 func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, addr *net.UDPAddr) (*clientData, error) {
 	var clientData *clientData
-	log.Debugln(s.port())
 	for address, client := range s.clients {
-		if client.isPublishing == isPubliser && client.streamType == streamType && client.isMapped == false{
+		if client.isPublishing == isPubliser && client.streamType == streamType && client.isMapped == false {
+			s.printMappingInfo(address, client, addr)
 			var track ServerConnSetuppedTrack
-			log.Debugln(">>", address, client)
 			if streamType == StreamTypeRTP {
 				track.udpRTPPort = addr.Port
 				track.udpRTCPPort = client.sc.setuppedTracks[client.trackID].udpRTCPPort
@@ -65,7 +105,7 @@ func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, 
 			var clientAddr clientAddr
 			clientAddr.fill(addr.IP, addr.Port)
 			s.clients[clientAddr] = clientData
-      client.isMapped = true
+			client.isMapped = true
 			return clientData, nil
 		}
 	}
@@ -78,20 +118,17 @@ func (s *serverUDPListener) handleNat(n int, addr *net.UDPAddr, buf []byte) (*cl
 	var err error = nil
 	log.Debugln("Unknown frame", addr.IP, addr.Port, n, buf[:8], s.streamType)
 	if buf[1] == 200 {
-		log.Infoln("Server RTCP", addr.IP, addr.Port)
 		clientData, err = s.updatePorts(true, s.streamType, addr)
 	} else if buf[1] == 201 {
-		log.Infoln("Client RTCP", addr.IP, addr.Port)
 		clientData, err = s.updatePorts(false, s.streamType, addr)
 	} else if buf[1] == 0 {
-		log.Infoln("Client RTP", addr.IP, addr.Port)
 		clientData, err = s.updatePorts(false, s.streamType, addr)
 	} else if buf[1] == 224 {
-		log.Infoln("Server RTP", addr.IP, addr.Port)
 		clientData, err = s.updatePorts(true, s.streamType, addr)
 	} else {
 		log.Debugln("Unknown type of frame, dropping connection")
 	}
+	s.printClientList(fmt.Sprintf("%s", Yellow("map")))
 	return clientData, err
 }
 
@@ -220,25 +257,24 @@ func (s *serverUDPListener) addClient(ip net.IP, port int, sc *ServerConn, track
 
 	var addr clientAddr
 	addr.fill(ip, port)
-	log.Debugln("add", addr)
 
 	s.clients[addr] = &clientData{
 		sc:           sc,
 		trackID:      trackID,
 		isPublishing: isPublishing,
 		streamType:   s.streamType,
-    isMapped: false,
+		isMapped:     false,
 	}
-	log.Debugln(">>>", s.clients)
+	s.printClientList(fmt.Sprintf("%s", Green("add")))
 }
 
 func (s *serverUDPListener) removeClient(ip net.IP, port int) {
 	s.clientsMutex.Lock()
 	defer s.clientsMutex.Unlock()
-	log.Debugln("rm", port)
 
 	var addr clientAddr
 	addr.fill(ip, port)
 
 	delete(s.clients, addr)
+	s.printClientList(fmt.Sprintf("%s", Red("remove")))
 }
