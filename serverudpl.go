@@ -37,7 +37,7 @@ type clientAddr struct {
 }
 
 func (s *serverUDPListener) LogInfo(msg ...interface{}) {
-	log.Info(Magenta(s.pc.LocalAddr())," ",fmt.Sprint(msg...))
+	log.Info(Magenta(s.pc.LocalAddr()), " ", fmt.Sprint(msg...))
 }
 
 func (p *clientAddr) fill(ip net.IP, port int) {
@@ -53,9 +53,9 @@ func (p *clientAddr) fill(ip net.IP, port int) {
 
 func (s *serverUDPListener) printClientList(title string) {
 	mylog := fmt.Sprintln(Cyan("LIST "), title, ":")
-	mapStr := " "
 	var pubStr string
 	for address, client := range s.clients {
+		mapStr := " "
 		if client.isMapped {
 			mapStr = "M"
 		}
