@@ -37,7 +37,8 @@ type clientAddr struct {
 }
 
 func (s *serverUDPListener) LogInfo(msg ...interface{}) {
-	log.Info(Magenta(s.pc.LocalAddr()), " ", fmt.Sprint(msg...))
+  myAddr := s.pc.LocalAddr()
+	log.Info(Magenta(myAddr), " ", fmt.Sprint(msg...))
 }
 
 func (p *clientAddr) fill(ip net.IP, port int) {
@@ -51,9 +52,10 @@ func (p *clientAddr) fill(ip net.IP, port int) {
 	}
 }
 
-func (s *serverUDPListener) printClientList(title string) {
+func (s *serverUDPListener) printClientList(title string, highlight clientAddr) {
 	mylog := fmt.Sprintln(Cyan("LIST "), title, ":")
 	var pubStr string
+	var addrStr string
 	for address, client := range s.clients {
 		mapStr := " "
 		if client.isMapped {
@@ -64,7 +66,12 @@ func (s *serverUDPListener) printClientList(title string) {
 		} else {
 			pubStr = Green("C").String()
 		}
-		mylog = mylog + fmt.Sprintln("    ", pubStr, Blue(mapStr), address.ip[(len(address.ip)-4):], address.port)
+    if (address == highlight) {
+      addrStr = Yellow(fmt.Sprint(address.ip[(len(address.ip)-4):], address.port)).String()
+    } else {
+      addrStr = fmt.Sprint(address.ip[(len(address.ip)-4):], address.port)
+    }
+		mylog = mylog + fmt.Sprintln("    ", pubStr, Blue(mapStr), addrStr)
 	}
 	s.LogInfo(mylog)
 }
@@ -106,6 +113,7 @@ func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, 
 			clientAddr.fill(addr.IP, addr.Port)
 			s.clients[clientAddr] = clientData
 			client.isMapped = true
+      s.printClientList(fmt.Sprintf("%s", Yellow("map")), clientAddr)
 			return clientData, nil
 		}
 	}
@@ -128,7 +136,6 @@ func (s *serverUDPListener) handleNat(n int, addr *net.UDPAddr, buf []byte) (*cl
 	} else {
 		log.Debugln("Unknown type of frame, dropping connection")
 	}
-	s.printClientList(fmt.Sprintf("%s", Yellow("map")))
 	return clientData, err
 }
 
@@ -265,7 +272,7 @@ func (s *serverUDPListener) addClient(ip net.IP, port int, sc *ServerConn, track
 		streamType:   s.streamType,
 		isMapped:     false,
 	}
-	s.printClientList(fmt.Sprintf("%s", Green("add")))
+	s.printClientList(fmt.Sprintf("%s", Green("add")), addr)
 }
 
 func (s *serverUDPListener) removeClient(ip net.IP, port int) {
@@ -275,6 +282,6 @@ func (s *serverUDPListener) removeClient(ip net.IP, port int) {
 	var addr clientAddr
 	addr.fill(ip, port)
 
+	s.printClientList(fmt.Sprintf("%s", Red("remove")), addr)
 	delete(s.clients, addr)
-	s.printClientList(fmt.Sprintf("%s", Red("remove")))
 }
