@@ -93,10 +93,13 @@ func (s *serverUDPListener) printMappingInfo(address clientAddr, client *clientD
 		address.ip[(len(address.ip)-4):], oldPort, "->", incoming.IP, incoming.Port)
 }
 
-func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, addr *net.UDPAddr) (*clientData, error) {
+func (s *serverUDPListener) updatePorts(isPublisher bool, streamType StreamType, addr *net.UDPAddr) (*clientData, error) {
 	var clientData *clientData
 	for address, client := range s.clients {
-		if client.isPublishing == isPubliser && client.streamType == streamType && client.isMapped == false {
+		if (client.isPublishing == isPublisher && client.streamType == streamType) {
+      if (isPublisher == false && client.isMapped == true) {
+        continue
+      }
 			s.printMappingInfo(address, client, addr)
 			var track ServerConnSetuppedTrack
 			if streamType == StreamTypeRTP {
@@ -117,7 +120,7 @@ func (s *serverUDPListener) updatePorts(isPubliser bool, streamType StreamType, 
 			return clientData, nil
 		}
 	}
-	log.Errorln("Not found in address table")
+	log.Errorln("Not found in address table", addr)
 	return nil, errors.New("Not found in address table")
 }
 
