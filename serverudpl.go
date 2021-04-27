@@ -37,7 +37,7 @@ type clientAddr struct {
 }
 
 func (s *serverUDPListener) LogInfo(msg ...interface{}) {
-  myAddr := s.pc.LocalAddr()
+	myAddr := s.pc.LocalAddr()
 	log.Info(Magenta(myAddr), " ", fmt.Sprint(msg...))
 }
 
@@ -66,11 +66,11 @@ func (s *serverUDPListener) printClientList(title string, highlight clientAddr) 
 		} else {
 			pubStr = Green("C").String()
 		}
-    if (address == highlight) {
-      addrStr = Yellow(fmt.Sprint(address.ip[(len(address.ip)-4):], address.port)).String()
-    } else {
-      addrStr = fmt.Sprint(address.ip[(len(address.ip)-4):], address.port)
-    }
+		if address == highlight {
+			addrStr = Yellow(fmt.Sprint(address.ip[(len(address.ip)-4):], address.port)).String()
+		} else {
+			addrStr = fmt.Sprint(address.ip[(len(address.ip)-4):], address.port)
+		}
 		mylog = mylog + fmt.Sprintln("    ", pubStr, Blue(mapStr), addrStr)
 	}
 	s.LogInfo(mylog)
@@ -96,10 +96,10 @@ func (s *serverUDPListener) printMappingInfo(address clientAddr, client *clientD
 func (s *serverUDPListener) updatePorts(isPublisher bool, streamType StreamType, addr *net.UDPAddr) (*clientData, error) {
 	var clientData *clientData
 	for address, client := range s.clients {
-		if (client.isPublishing == isPublisher && client.streamType == streamType) {
-      if (isPublisher == false && client.isMapped == true) {
-        continue
-      }
+		if client.isPublishing == isPublisher && client.streamType == streamType {
+			if isPublisher == false && client.isMapped == true {
+				continue
+			}
 			s.printMappingInfo(address, client, addr)
 			var track ServerConnSetuppedTrack
 			if streamType == StreamTypeRTP {
@@ -116,7 +116,7 @@ func (s *serverUDPListener) updatePorts(isPublisher bool, streamType StreamType,
 			clientAddr.fill(addr.IP, addr.Port)
 			s.clients[clientAddr] = clientData
 			client.isMapped = true
-      s.printClientList(fmt.Sprintf("%s", Yellow("map")), clientAddr)
+			s.printClientList(fmt.Sprintf("%s", Yellow("map")), clientAddr)
 			return clientData, nil
 		}
 	}
@@ -137,7 +137,8 @@ func (s *serverUDPListener) handleNat(n int, addr *net.UDPAddr, buf []byte) (*cl
 	} else if buf[1] == 224 {
 		clientData, err = s.updatePorts(true, s.streamType, addr)
 	} else {
-		log.Debugln("Unknown type of frame, dropping connection")
+		log.Error(Red("Unknown type of frame, dropping connection"))
+		return nil, errors.New("Not found in matching")
 	}
 	return clientData, err
 }
@@ -286,5 +287,15 @@ func (s *serverUDPListener) removeClient(ip net.IP, port int) {
 	addr.fill(ip, port)
 
 	s.printClientList(fmt.Sprintf("%s", Red("remove")), addr)
-	delete(s.clients, addr)
+	clientData, ok := s.clients[addr]
+	if ok {
+		if clientData.isPublishing {
+			for client := range s.clients {
+				delete(s.clients, client)
+			}
+
+		} else {
+			delete(s.clients, addr)
+		}
+	}
 }
