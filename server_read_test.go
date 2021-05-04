@@ -2,6 +2,7 @@ package gortsplib
 
 import (
 	"bufio"
+	"crypto/tls"
 	"net"
 	"testing"
 	"time"
@@ -58,36 +59,24 @@ func TestServerReadSetupPath(t *testing.T) {
 		},
 	} {
 		t.Run(ca.name, func(t *testing.T) {
-			type pathTrackIDPair struct {
-				path    string
-				trackID int
-			}
-			setupDone := make(chan pathTrackIDPair)
+			setupDone := make(chan struct{})
 
-			s, err := Serve("127.0.0.1:8554")
+			s := &Server{
+				Handler: &testServerHandler{
+					onSetup: func(ctx *ServerHandlerOnSetupCtx) (*base.Response, error) {
+						require.Equal(t, ca.path, ctx.Path)
+						require.Equal(t, ca.trackID, ctx.TrackID)
+						close(setupDone)
+						return &base.Response{
+							StatusCode: base.StatusOK,
+						}, nil
+					},
+				},
+			}
+
+			err := s.Start("127.0.0.1:8554")
 			require.NoError(t, err)
 			defer s.Close()
-
-			serverDone := make(chan struct{})
-			defer func() { <-serverDone }()
-			go func() {
-				defer close(serverDone)
-
-				conn, err := s.Accept()
-				require.NoError(t, err)
-				defer conn.Close()
-
-				onSetup := func(ctx *ServerConnSetupCtx) (*base.Response, error) {
-					setupDone <- pathTrackIDPair{ctx.Path, ctx.TrackID}
-					return &base.Response{
-						StatusCode: base.StatusOK,
-					}, nil
-				}
-
-				<-conn.Read(ServerConnReadHandlers{
-					OnSetup: onSetup,
-				})
-			}()
 
 			conn, err := net.Dial("tcp", "localhost:8554")
 			require.NoError(t, err)
@@ -117,9 +106,7 @@ func TestServerReadSetupPath(t *testing.T) {
 			}.Write(bconn.Writer)
 			require.NoError(t, err)
 
-			pair := <-setupDone
-			require.Equal(t, ca.path, pair.path)
-			require.Equal(t, ca.trackID, pair.trackID)
+			<-setupDone
 
 			var res base.Response
 			err = res.Read(bconn.Reader)
@@ -129,33 +116,26 @@ func TestServerReadSetupPath(t *testing.T) {
 	}
 }
 
-func TestServerReadSetupErrorDifferentPaths(t *testing.T) {
-	serverErr := make(chan error)
+func TestServerReadErrorSetupDifferentPaths(t *testing.T) {
+	connClosed := make(chan struct{})
 
-	s, err := Serve("127.0.0.1:8554")
+	s := &Server{
+		Handler: &testServerHandler{
+			onConnClose: func(sc *ServerConn, err error) {
+				require.Equal(t, "can't setup tracks with different paths", err.Error())
+				close(connClosed)
+			},
+			onSetup: func(ctx *ServerHandlerOnSetupCtx) (*base.Response, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+		},
+	}
+
+	err := s.Start("127.0.0.1:8554")
 	require.NoError(t, err)
 	defer s.Close()
-
-	serverDone := make(chan struct{})
-	defer func() { <-serverDone }()
-	go func() {
-		defer close(serverDone)
-
-		conn, err := s.Accept()
-		require.NoError(t, err)
-		defer conn.Close()
-
-		onSetup := func(ctx *ServerConnSetupCtx) (*base.Response, error) {
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
-
-		err = <-conn.Read(ServerConnReadHandlers{
-			OnSetup: onSetup,
-		})
-		serverErr <- err
-	}()
 
 	conn, err := net.Dial("tcp", "localhost:8554")
 	require.NoError(t, err)
@@ -198,6 +178,7 @@ func TestServerReadSetupErrorDifferentPaths(t *testing.T) {
 		Header: base.Header{
 			"CSeq":      base.HeaderValue{"2"},
 			"Transport": th.Write(),
+			"Session":   res.Header["Session"],
 		},
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
@@ -206,37 +187,29 @@ func TestServerReadSetupErrorDifferentPaths(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, base.StatusBadRequest, res.StatusCode)
 
-	err = <-serverErr
-	require.Equal(t, "can't setup tracks with different paths", err.Error())
+	<-connClosed
 }
 
-func TestServerReadSetupErrorTrackTwice(t *testing.T) {
-	serverErr := make(chan error)
+func TestServerReadErrorSetupTrackTwice(t *testing.T) {
+	connClosed := make(chan struct{})
 
-	s, err := Serve("127.0.0.1:8554")
+	s := &Server{
+		Handler: &testServerHandler{
+			onConnClose: func(sc *ServerConn, err error) {
+				require.Equal(t, "track 0 has already been setup", err.Error())
+				close(connClosed)
+			},
+			onSetup: func(ctx *ServerHandlerOnSetupCtx) (*base.Response, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+		},
+	}
+
+	err := s.Start("127.0.0.1:8554")
 	require.NoError(t, err)
 	defer s.Close()
-
-	serverDone := make(chan struct{})
-	defer func() { <-serverDone }()
-	go func() {
-		defer close(serverDone)
-
-		conn, err := s.Accept()
-		require.NoError(t, err)
-		defer conn.Close()
-
-		onSetup := func(ctx *ServerConnSetupCtx) (*base.Response, error) {
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
-
-		err = <-conn.Read(ServerConnReadHandlers{
-			OnSetup: onSetup,
-		})
-		serverErr <- err
-	}()
 
 	conn, err := net.Dial("tcp", "localhost:8554")
 	require.NoError(t, err)
@@ -279,6 +252,7 @@ func TestServerReadSetupErrorTrackTwice(t *testing.T) {
 		Header: base.Header{
 			"CSeq":      base.HeaderValue{"2"},
 			"Transport": th.Write(),
+			"Session":   res.Header["Session"],
 		},
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
@@ -287,69 +261,85 @@ func TestServerReadSetupErrorTrackTwice(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, base.StatusBadRequest, res.StatusCode)
 
-	err = <-serverErr
-	require.Equal(t, "track 0 has already been setup", err.Error())
+	<-connClosed
 }
 
 func TestServerRead(t *testing.T) {
 	for _, proto := range []string{
 		"udp",
 		"tcp",
+		"tls",
 	} {
 		t.Run(proto, func(t *testing.T) {
+			connOpened := make(chan struct{})
+			connClosed := make(chan struct{})
+			sessionOpened := make(chan struct{})
+			sessionClosed := make(chan struct{})
 			framesReceived := make(chan struct{})
 
-			conf := ServerConf{
-				UDPRTPAddress:  "127.0.0.1:8000",
-				UDPRTCPAddress: "127.0.0.1:8001",
+			s := &Server{
+				Handler: &testServerHandler{
+					onConnOpen: func(sc *ServerConn) {
+						close(connOpened)
+					},
+					onConnClose: func(sc *ServerConn, err error) {
+						close(connClosed)
+					},
+					onSessionOpen: func(ss *ServerSession) {
+						close(sessionOpened)
+					},
+					onSessionClose: func(ss *ServerSession, err error) {
+						close(sessionClosed)
+					},
+					onSetup: func(ctx *ServerHandlerOnSetupCtx) (*base.Response, error) {
+						return &base.Response{
+							StatusCode: base.StatusOK,
+						}, nil
+					},
+					onPlay: func(ctx *ServerHandlerOnPlayCtx) (*base.Response, error) {
+						ctx.Session.WriteFrame(0, StreamTypeRTP, []byte{0x01, 0x02, 0x03, 0x04})
+						ctx.Session.WriteFrame(0, StreamTypeRTCP, []byte{0x05, 0x06, 0x07, 0x08})
+
+						return &base.Response{
+							StatusCode: base.StatusOK,
+						}, nil
+					},
+					onFrame: func(ctx *ServerHandlerOnFrameCtx) {
+						require.Equal(t, 0, ctx.TrackID)
+						require.Equal(t, StreamTypeRTCP, ctx.StreamType)
+						require.Equal(t, []byte{0x01, 0x02, 0x03, 0x04}, ctx.Payload)
+						close(framesReceived)
+					},
+				},
 			}
 
-			s, err := conf.Serve("127.0.0.1:8554")
+			switch proto {
+			case "udp":
+				s.UDPRTPAddress = "127.0.0.1:8000"
+				s.UDPRTCPAddress = "127.0.0.1:8001"
+
+			case "tls":
+				cert, err := tls.X509KeyPair(serverCert, serverKey)
+				require.NoError(t, err)
+				s.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+			}
+
+			err := s.Start("127.0.0.1:8554")
 			require.NoError(t, err)
 			defer s.Close()
 
-			serverDone := make(chan struct{})
-			defer func() { <-serverDone }()
-			go func() {
-				defer close(serverDone)
-
-				conn, err := s.Accept()
-				require.NoError(t, err)
-				defer conn.Close()
-
-				onSetup := func(ctx *ServerConnSetupCtx) (*base.Response, error) {
-					return &base.Response{
-						StatusCode: base.StatusOK,
-					}, nil
-				}
-
-				onPlay := func(ctx *ServerConnPlayCtx) (*base.Response, error) {
-					conn.WriteFrame(0, StreamTypeRTP, []byte{0x01, 0x02, 0x03, 0x04})
-					conn.WriteFrame(0, StreamTypeRTCP, []byte{0x05, 0x06, 0x07, 0x08})
-
-					return &base.Response{
-						StatusCode: base.StatusOK,
-					}, nil
-				}
-
-				onFrame := func(trackID int, typ StreamType, buf []byte) {
-					require.Equal(t, 0, trackID)
-					require.Equal(t, StreamTypeRTCP, typ)
-					require.Equal(t, []byte{0x01, 0x02, 0x03, 0x04}, buf)
-					close(framesReceived)
-				}
-
-				<-conn.Read(ServerConnReadHandlers{
-					OnSetup: onSetup,
-					OnPlay:  onPlay,
-					OnFrame: onFrame,
-				})
-			}()
-
-			conn, err := net.Dial("tcp", "localhost:8554")
+			nconn, err := net.Dial("tcp", "localhost:8554")
 			require.NoError(t, err)
-			defer conn.Close()
+
+			conn := func() net.Conn {
+				if proto == "tls" {
+					return tls.Client(nconn, &tls.Config{InsecureSkipVerify: true})
+				}
+				return nconn
+			}()
 			bconn := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+
+			<-connOpened
 
 			inTH := &headers.Transport{
 				Delivery: func() *base.StreamDelivery {
@@ -389,6 +379,8 @@ func TestServerRead(t *testing.T) {
 			err = th.Read(res.Header["Transport"])
 			require.NoError(t, err)
 
+			<-sessionOpened
+
 			var l1 net.PacketConn
 			var l2 net.PacketConn
 			if proto == "udp" {
@@ -405,7 +397,8 @@ func TestServerRead(t *testing.T) {
 				Method: base.Play,
 				URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
 				Header: base.Header{
-					"CSeq": base.HeaderValue{"2"},
+					"CSeq":    base.HeaderValue{"2"},
+					"Session": res.Header["Session"],
 				},
 			}.Write(bconn.Writer)
 			require.NoError(t, err)
@@ -459,66 +452,75 @@ func TestServerRead(t *testing.T) {
 			}
 
 			<-framesReceived
+
+			err = base.Request{
+				Method: base.Teardown,
+				URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
+				Header: base.Header{
+					"CSeq":    base.HeaderValue{"3"},
+					"Session": res.Header["Session"],
+				},
+			}.Write(bconn.Writer)
+			require.NoError(t, err)
+
+			err = res.Read(bconn.Reader)
+			require.NoError(t, err)
+			require.Equal(t, base.StatusOK, res.StatusCode)
+
+			<-sessionClosed
+
+			nconn.Close()
+			<-connClosed
 		})
 	}
 }
 
 func TestServerReadTCPResponseBeforeFrames(t *testing.T) {
-	s, err := Serve("127.0.0.1:8554")
+	writerDone := make(chan struct{})
+	writerTerminate := make(chan struct{})
+
+	s := &Server{
+		Handler: &testServerHandler{
+			onConnClose: func(sc *ServerConn, err error) {
+				close(writerTerminate)
+				<-writerDone
+			},
+			onSetup: func(ctx *ServerHandlerOnSetupCtx) (*base.Response, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+			onPlay: func(ctx *ServerHandlerOnPlayCtx) (*base.Response, error) {
+				go func() {
+					defer close(writerDone)
+
+					ctx.Session.WriteFrame(0, StreamTypeRTP, []byte("\x00\x00\x00\x00"))
+
+					t := time.NewTicker(50 * time.Millisecond)
+					defer t.Stop()
+
+					for {
+						select {
+						case <-t.C:
+							ctx.Session.WriteFrame(0, StreamTypeRTP, []byte("\x00\x00\x00\x00"))
+						case <-writerTerminate:
+							return
+						}
+					}
+				}()
+
+				time.Sleep(50 * time.Millisecond)
+
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+		},
+	}
+
+	err := s.Start("127.0.0.1:8554")
 	require.NoError(t, err)
 	defer s.Close()
-
-	serverDone := make(chan struct{})
-	defer func() { <-serverDone }()
-	go func() {
-		defer close(serverDone)
-
-		conn, err := s.Accept()
-		require.NoError(t, err)
-		defer conn.Close()
-
-		writerDone := make(chan struct{})
-		defer func() { <-writerDone }()
-		writerTerminate := make(chan struct{})
-		defer close(writerTerminate)
-
-		onSetup := func(ctx *ServerConnSetupCtx) (*base.Response, error) {
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
-
-		onPlay := func(ctx *ServerConnPlayCtx) (*base.Response, error) {
-			go func() {
-				defer close(writerDone)
-
-				conn.WriteFrame(0, StreamTypeRTP, []byte("\x00\x00\x00\x00"))
-
-				t := time.NewTicker(50 * time.Millisecond)
-				defer t.Stop()
-
-				for {
-					select {
-					case <-t.C:
-						conn.WriteFrame(0, StreamTypeRTP, []byte("\x00\x00\x00\x00"))
-					case <-writerTerminate:
-						return
-					}
-				}
-			}()
-
-			time.Sleep(50 * time.Millisecond)
-
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
-
-		<-conn.Read(ServerConnReadHandlers{
-			OnSetup: onSetup,
-			OnPlay:  onPlay,
-		})
-	}()
 
 	conn, err := net.Dial("tcp", "localhost:8554")
 	require.NoError(t, err)
@@ -555,7 +557,8 @@ func TestServerReadTCPResponseBeforeFrames(t *testing.T) {
 		Method: base.Play,
 		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
 		Header: base.Header{
-			"CSeq": base.HeaderValue{"2"},
+			"CSeq":    base.HeaderValue{"2"},
+			"Session": res.Header["Session"],
 		},
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
@@ -571,59 +574,26 @@ func TestServerReadTCPResponseBeforeFrames(t *testing.T) {
 }
 
 func TestServerReadPlayPlay(t *testing.T) {
-	s, err := Serve("127.0.0.1:8554")
+	s := &Server{
+		Handler: &testServerHandler{
+			onSetup: func(ctx *ServerHandlerOnSetupCtx) (*base.Response, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+			onPlay: func(ctx *ServerHandlerOnPlayCtx) (*base.Response, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+		},
+		UDPRTPAddress:  "127.0.0.1:8000",
+		UDPRTCPAddress: "127.0.0.1:8001",
+	}
+
+	err := s.Start("127.0.0.1:8554")
 	require.NoError(t, err)
 	defer s.Close()
-
-	serverDone := make(chan struct{})
-	defer func() { <-serverDone }()
-	go func() {
-		defer close(serverDone)
-
-		conn, err := s.Accept()
-		require.NoError(t, err)
-		defer conn.Close()
-
-		writerDone := make(chan struct{})
-		defer func() { <-writerDone }()
-		writerTerminate := make(chan struct{})
-		defer close(writerTerminate)
-
-		onSetup := func(ctx *ServerConnSetupCtx) (*base.Response, error) {
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
-
-		onPlay := func(ctx *ServerConnPlayCtx) (*base.Response, error) {
-			if conn.State() != ServerConnStatePlay {
-				go func() {
-					defer close(writerDone)
-
-					t := time.NewTicker(50 * time.Millisecond)
-					defer t.Stop()
-
-					for {
-						select {
-						case <-t.C:
-							conn.WriteFrame(0, StreamTypeRTP, []byte("\x00\x00\x00\x00"))
-						case <-writerTerminate:
-							return
-						}
-					}
-				}()
-			}
-
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
-
-		<-conn.Read(ServerConnReadHandlers{
-			OnSetup: onSetup,
-			OnPlay:  onPlay,
-		})
-	}()
 
 	conn, err := net.Dial("tcp", "localhost:8554")
 	require.NoError(t, err)
@@ -636,7 +606,7 @@ func TestServerReadPlayPlay(t *testing.T) {
 		Header: base.Header{
 			"CSeq": base.HeaderValue{"1"},
 			"Transport": headers.Transport{
-				Protocol: StreamProtocolTCP,
+				Protocol: StreamProtocolUDP,
 				Delivery: func() *base.StreamDelivery {
 					v := base.StreamDeliveryUnicast
 					return &v
@@ -645,7 +615,7 @@ func TestServerReadPlayPlay(t *testing.T) {
 					v := headers.TransportModePlay
 					return &v
 				}(),
-				InterleavedIDs: &[2]int{0, 1},
+				ClientPorts: &[2]int{30450, 30451},
 			}.Write(),
 		},
 	}.Write(bconn.Writer)
@@ -660,7 +630,8 @@ func TestServerReadPlayPlay(t *testing.T) {
 		Method: base.Play,
 		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
 		Header: base.Header{
-			"CSeq": base.HeaderValue{"2"},
+			"CSeq":    base.HeaderValue{"2"},
+			"Session": res.Header["Session"],
 		},
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
@@ -673,46 +644,159 @@ func TestServerReadPlayPlay(t *testing.T) {
 		Method: base.Play,
 		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
 		Header: base.Header{
-			"CSeq": base.HeaderValue{"3"},
+			"CSeq":    base.HeaderValue{"3"},
+			"Session": res.Header["Session"],
 		},
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
 
-	buf := make([]byte, 2048)
-	err = res.ReadIgnoreFrames(bconn.Reader, buf)
+	err = res.Read(bconn.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusOK, res.StatusCode)
 }
 
 func TestServerReadPlayPausePlay(t *testing.T) {
-	s, err := Serve("127.0.0.1:8554")
+	writerStarted := false
+	writerDone := make(chan struct{})
+	writerTerminate := make(chan struct{})
+
+	s := &Server{
+		Handler: &testServerHandler{
+			onConnClose: func(sc *ServerConn, err error) {
+				close(writerTerminate)
+				<-writerDone
+			},
+			onSetup: func(ctx *ServerHandlerOnSetupCtx) (*base.Response, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+			onPlay: func(ctx *ServerHandlerOnPlayCtx) (*base.Response, error) {
+				if !writerStarted {
+					writerStarted = true
+					go func() {
+						defer close(writerDone)
+
+						t := time.NewTicker(50 * time.Millisecond)
+						defer t.Stop()
+
+						for {
+							select {
+							case <-t.C:
+								ctx.Session.WriteFrame(0, StreamTypeRTP, []byte("\x00\x00\x00\x00"))
+							case <-writerTerminate:
+								return
+							}
+						}
+					}()
+				}
+
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+			onPause: func(ctx *ServerHandlerOnPauseCtx) (*base.Response, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+		},
+	}
+
+	err := s.Start("127.0.0.1:8554")
 	require.NoError(t, err)
 	defer s.Close()
 
-	serverDone := make(chan struct{})
-	defer func() { <-serverDone }()
-	go func() {
-		defer close(serverDone)
+	conn, err := net.Dial("tcp", "localhost:8554")
+	require.NoError(t, err)
+	defer conn.Close()
+	bconn := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
 
-		conn, err := s.Accept()
-		require.NoError(t, err)
-		defer conn.Close()
+	err = base.Request{
+		Method: base.Setup,
+		URL:    base.MustParseURL("rtsp://localhost:8554/teststream/trackID=0"),
+		Header: base.Header{
+			"CSeq": base.HeaderValue{"1"},
+			"Transport": headers.Transport{
+				Protocol: StreamProtocolTCP,
+				Delivery: func() *base.StreamDelivery {
+					v := base.StreamDeliveryUnicast
+					return &v
+				}(),
+				Mode: func() *headers.TransportMode {
+					v := headers.TransportModePlay
+					return &v
+				}(),
+				InterleavedIDs: &[2]int{0, 1},
+			}.Write(),
+		},
+	}.Write(bconn.Writer)
+	require.NoError(t, err)
 
-		writerStarted := false
-		writerDone := make(chan struct{})
-		defer func() { <-writerDone }()
-		writerTerminate := make(chan struct{})
-		defer close(writerTerminate)
+	var res base.Response
+	err = res.Read(bconn.Reader)
+	require.NoError(t, err)
+	require.Equal(t, base.StatusOK, res.StatusCode)
 
-		onSetup := func(ctx *ServerConnSetupCtx) (*base.Response, error) {
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
+	err = base.Request{
+		Method: base.Play,
+		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
+		Header: base.Header{
+			"CSeq":    base.HeaderValue{"2"},
+			"Session": res.Header["Session"],
+		},
+	}.Write(bconn.Writer)
+	require.NoError(t, err)
 
-		onPlay := func(ctx *ServerConnPlayCtx) (*base.Response, error) {
-			if !writerStarted {
-				writerStarted = true
+	err = res.Read(bconn.Reader)
+	require.NoError(t, err)
+	require.Equal(t, base.StatusOK, res.StatusCode)
+
+	err = base.Request{
+		Method: base.Pause,
+		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
+		Header: base.Header{
+			"CSeq":    base.HeaderValue{"2"},
+			"Session": res.Header["Session"],
+		},
+	}.Write(bconn.Writer)
+	require.NoError(t, err)
+
+	err = res.Read(bconn.Reader)
+	require.NoError(t, err)
+	require.Equal(t, base.StatusOK, res.StatusCode)
+
+	err = base.Request{
+		Method: base.Play,
+		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
+		Header: base.Header{
+			"CSeq":    base.HeaderValue{"2"},
+			"Session": res.Header["Session"],
+		},
+	}.Write(bconn.Writer)
+	require.NoError(t, err)
+
+	err = res.Read(bconn.Reader)
+	require.NoError(t, err)
+	require.Equal(t, base.StatusOK, res.StatusCode)
+}
+
+func TestServerReadPlayPausePause(t *testing.T) {
+	writerDone := make(chan struct{})
+	writerTerminate := make(chan struct{})
+
+	s := &Server{
+		Handler: &testServerHandler{
+			onConnClose: func(sc *ServerConn, err error) {
+				close(writerTerminate)
+				<-writerDone
+			},
+			onSetup: func(ctx *ServerHandlerOnSetupCtx) (*base.Response, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+			onPlay: func(ctx *ServerHandlerOnPlayCtx) (*base.Response, error) {
 				go func() {
 					defer close(writerDone)
 
@@ -722,169 +806,29 @@ func TestServerReadPlayPausePlay(t *testing.T) {
 					for {
 						select {
 						case <-t.C:
-							conn.WriteFrame(0, StreamTypeRTP, []byte("\x00\x00\x00\x00"))
+							ctx.Session.WriteFrame(0, StreamTypeRTP, []byte("\x00\x00\x00\x00"))
 						case <-writerTerminate:
 							return
 						}
 					}
 				}()
-			}
 
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
-
-		onPause := func(ctx *ServerConnPauseCtx) (*base.Response, error) {
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
-
-		<-conn.Read(ServerConnReadHandlers{
-			OnSetup: onSetup,
-			OnPlay:  onPlay,
-			OnPause: onPause,
-		})
-	}()
-
-	conn, err := net.Dial("tcp", "localhost:8554")
-	require.NoError(t, err)
-	defer conn.Close()
-	bconn := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
-
-	err = base.Request{
-		Method: base.Setup,
-		URL:    base.MustParseURL("rtsp://localhost:8554/teststream/trackID=0"),
-		Header: base.Header{
-			"CSeq": base.HeaderValue{"1"},
-			"Transport": headers.Transport{
-				Protocol: StreamProtocolTCP,
-				Delivery: func() *base.StreamDelivery {
-					v := base.StreamDeliveryUnicast
-					return &v
-				}(),
-				Mode: func() *headers.TransportMode {
-					v := headers.TransportModePlay
-					return &v
-				}(),
-				InterleavedIDs: &[2]int{0, 1},
-			}.Write(),
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+			onPause: func(ctx *ServerHandlerOnPauseCtx) (*base.Response, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
 		},
-	}.Write(bconn.Writer)
-	require.NoError(t, err)
+	}
 
-	var res base.Response
-	err = res.Read(bconn.Reader)
-	require.NoError(t, err)
-	require.Equal(t, base.StatusOK, res.StatusCode)
-
-	err = base.Request{
-		Method: base.Play,
-		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
-		Header: base.Header{
-			"CSeq": base.HeaderValue{"2"},
-		},
-	}.Write(bconn.Writer)
-	require.NoError(t, err)
-
-	err = res.Read(bconn.Reader)
-	require.NoError(t, err)
-	require.Equal(t, base.StatusOK, res.StatusCode)
-
-	err = base.Request{
-		Method: base.Pause,
-		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
-		Header: base.Header{
-			"CSeq": base.HeaderValue{"2"},
-		},
-	}.Write(bconn.Writer)
-	require.NoError(t, err)
-
-	buf := make([]byte, 2048)
-	err = res.ReadIgnoreFrames(bconn.Reader, buf)
-	require.NoError(t, err)
-	require.Equal(t, base.StatusOK, res.StatusCode)
-
-	err = base.Request{
-		Method: base.Play,
-		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
-		Header: base.Header{
-			"CSeq": base.HeaderValue{"2"},
-		},
-	}.Write(bconn.Writer)
-	require.NoError(t, err)
-
-	err = res.Read(bconn.Reader)
-	require.NoError(t, err)
-	require.Equal(t, base.StatusOK, res.StatusCode)
-
-	var fr base.InterleavedFrame
-	fr.Payload = make([]byte, 2048)
-	err = fr.Read(bconn.Reader)
-	require.NoError(t, err)
-}
-
-func TestServerReadPlayPausePause(t *testing.T) {
-	s, err := Serve("127.0.0.1:8554")
+	err := s.Start("127.0.0.1:8554")
 	require.NoError(t, err)
 	defer s.Close()
 
-	serverDone := make(chan struct{})
-	defer func() { <-serverDone }()
-	go func() {
-		defer close(serverDone)
-
-		conn, err := s.Accept()
-		require.NoError(t, err)
-		defer conn.Close()
-
-		writerDone := make(chan struct{})
-		defer func() { <-writerDone }()
-		writerTerminate := make(chan struct{})
-		defer close(writerTerminate)
-
-		onSetup := func(ctx *ServerConnSetupCtx) (*base.Response, error) {
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
-
-		onPlay := func(ctx *ServerConnPlayCtx) (*base.Response, error) {
-			go func() {
-				defer close(writerDone)
-
-				t := time.NewTicker(50 * time.Millisecond)
-				defer t.Stop()
-
-				for {
-					select {
-					case <-t.C:
-						conn.WriteFrame(0, StreamTypeRTP, []byte("\x00\x00\x00\x00"))
-					case <-writerTerminate:
-						return
-					}
-				}
-			}()
-
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
-
-		onPause := func(ctx *ServerConnPauseCtx) (*base.Response, error) {
-			return &base.Response{
-				StatusCode: base.StatusOK,
-			}, nil
-		}
-
-		<-conn.Read(ServerConnReadHandlers{
-			OnSetup: onSetup,
-			OnPlay:  onPlay,
-			OnPause: onPause,
-		})
-	}()
-
 	conn, err := net.Dial("tcp", "localhost:8554")
 	require.NoError(t, err)
 	defer conn.Close()
@@ -920,7 +864,8 @@ func TestServerReadPlayPausePause(t *testing.T) {
 		Method: base.Play,
 		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
 		Header: base.Header{
-			"CSeq": base.HeaderValue{"2"},
+			"CSeq":    base.HeaderValue{"2"},
+			"Session": res.Header["Session"],
 		},
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
@@ -933,7 +878,8 @@ func TestServerReadPlayPausePause(t *testing.T) {
 		Method: base.Pause,
 		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
 		Header: base.Header{
-			"CSeq": base.HeaderValue{"2"},
+			"CSeq":    base.HeaderValue{"2"},
+			"Session": res.Header["Session"],
 		},
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
@@ -947,7 +893,8 @@ func TestServerReadPlayPausePause(t *testing.T) {
 		Method: base.Pause,
 		URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
 		Header: base.Header{
-			"CSeq": base.HeaderValue{"2"},
+			"CSeq":    base.HeaderValue{"2"},
+			"Session": res.Header["Session"],
 		},
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
@@ -956,4 +903,204 @@ func TestServerReadPlayPausePause(t *testing.T) {
 	err = res.ReadIgnoreFrames(bconn.Reader, buf)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusOK, res.StatusCode)
+}
+
+func TestServerReadTimeout(t *testing.T) {
+	for _, proto := range []string{
+		"udp",
+		// checking TCP is useless, since there's no timeout when reading with TCP
+	} {
+		t.Run(proto, func(t *testing.T) {
+			sessionClosed := make(chan struct{})
+
+			s := &Server{
+				Handler: &testServerHandler{
+					onSessionClose: func(ss *ServerSession, err error) {
+						close(sessionClosed)
+					},
+					onAnnounce: func(ctx *ServerHandlerOnAnnounceCtx) (*base.Response, error) {
+						return &base.Response{
+							StatusCode: base.StatusOK,
+						}, nil
+					},
+					onSetup: func(ctx *ServerHandlerOnSetupCtx) (*base.Response, error) {
+						return &base.Response{
+							StatusCode: base.StatusOK,
+						}, nil
+					},
+					onPlay: func(ctx *ServerHandlerOnPlayCtx) (*base.Response, error) {
+						return &base.Response{
+							StatusCode: base.StatusOK,
+						}, nil
+					},
+				},
+				ReadTimeout:                    1 * time.Second,
+				closeSessionAfterNoRequestsFor: 1 * time.Second,
+			}
+
+			s.UDPRTPAddress = "127.0.0.1:8000"
+			s.UDPRTCPAddress = "127.0.0.1:8001"
+
+			err := s.Start("127.0.0.1:8554")
+			require.NoError(t, err)
+			defer s.Close()
+
+			nconn, err := net.Dial("tcp", "localhost:8554")
+			require.NoError(t, err)
+			defer nconn.Close()
+			bconn := bufio.NewReadWriter(bufio.NewReader(nconn), bufio.NewWriter(nconn))
+
+			inTH := &headers.Transport{
+				Delivery: func() *base.StreamDelivery {
+					v := base.StreamDeliveryUnicast
+					return &v
+				}(),
+				Mode: func() *headers.TransportMode {
+					v := headers.TransportModePlay
+					return &v
+				}(),
+			}
+
+			inTH.Protocol = StreamProtocolUDP
+			inTH.ClientPorts = &[2]int{35466, 35467}
+
+			err = base.Request{
+				Method: base.Setup,
+				URL:    base.MustParseURL("rtsp://localhost:8554/teststream/trackID=0"),
+				Header: base.Header{
+					"CSeq":      base.HeaderValue{"1"},
+					"Transport": inTH.Write(),
+				},
+			}.Write(bconn.Writer)
+			require.NoError(t, err)
+
+			var res base.Response
+			err = res.Read(bconn.Reader)
+			require.NoError(t, err)
+			require.Equal(t, base.StatusOK, res.StatusCode)
+
+			err = base.Request{
+				Method: base.Play,
+				URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
+				Header: base.Header{
+					"CSeq":    base.HeaderValue{"2"},
+					"Session": res.Header["Session"],
+				},
+			}.Write(bconn.Writer)
+			require.NoError(t, err)
+
+			err = res.Read(bconn.Reader)
+			require.NoError(t, err)
+			require.Equal(t, base.StatusOK, res.StatusCode)
+
+			<-sessionClosed
+		})
+	}
+}
+
+func TestServerReadWithoutTeardown(t *testing.T) {
+	for _, proto := range []string{
+		"udp",
+		"tcp",
+	} {
+		t.Run(proto, func(t *testing.T) {
+			connClosed := make(chan struct{})
+			sessionClosed := make(chan struct{})
+
+			s := &Server{
+				Handler: &testServerHandler{
+					onConnClose: func(sc *ServerConn, err error) {
+						close(connClosed)
+					},
+					onSessionClose: func(ss *ServerSession, err error) {
+						close(sessionClosed)
+					},
+					onAnnounce: func(ctx *ServerHandlerOnAnnounceCtx) (*base.Response, error) {
+						return &base.Response{
+							StatusCode: base.StatusOK,
+						}, nil
+					},
+					onSetup: func(ctx *ServerHandlerOnSetupCtx) (*base.Response, error) {
+						return &base.Response{
+							StatusCode: base.StatusOK,
+						}, nil
+					},
+					onPlay: func(ctx *ServerHandlerOnPlayCtx) (*base.Response, error) {
+						return &base.Response{
+							StatusCode: base.StatusOK,
+						}, nil
+					},
+				},
+				ReadTimeout:                    1 * time.Second,
+				closeSessionAfterNoRequestsFor: 1 * time.Second,
+			}
+
+			if proto == "udp" {
+				s.UDPRTPAddress = "127.0.0.1:8000"
+				s.UDPRTCPAddress = "127.0.0.1:8001"
+			}
+
+			err := s.Start("127.0.0.1:8554")
+			require.NoError(t, err)
+			defer s.Close()
+
+			nconn, err := net.Dial("tcp", "localhost:8554")
+			require.NoError(t, err)
+			defer nconn.Close()
+			bconn := bufio.NewReadWriter(bufio.NewReader(nconn), bufio.NewWriter(nconn))
+
+			inTH := &headers.Transport{
+				Delivery: func() *base.StreamDelivery {
+					v := base.StreamDeliveryUnicast
+					return &v
+				}(),
+				Mode: func() *headers.TransportMode {
+					v := headers.TransportModePlay
+					return &v
+				}(),
+			}
+
+			if proto == "udp" {
+				inTH.Protocol = StreamProtocolUDP
+				inTH.ClientPorts = &[2]int{35466, 35467}
+			} else {
+				inTH.Protocol = StreamProtocolTCP
+				inTH.InterleavedIDs = &[2]int{0, 1}
+			}
+
+			err = base.Request{
+				Method: base.Setup,
+				URL:    base.MustParseURL("rtsp://localhost:8554/teststream/trackID=0"),
+				Header: base.Header{
+					"CSeq":      base.HeaderValue{"1"},
+					"Transport": inTH.Write(),
+				},
+			}.Write(bconn.Writer)
+			require.NoError(t, err)
+
+			var res base.Response
+			err = res.Read(bconn.Reader)
+			require.NoError(t, err)
+			require.Equal(t, base.StatusOK, res.StatusCode)
+
+			err = base.Request{
+				Method: base.Play,
+				URL:    base.MustParseURL("rtsp://localhost:8554/teststream"),
+				Header: base.Header{
+					"CSeq":    base.HeaderValue{"2"},
+					"Session": res.Header["Session"],
+				},
+			}.Write(bconn.Writer)
+			require.NoError(t, err)
+
+			err = res.Read(bconn.Reader)
+			require.NoError(t, err)
+			require.Equal(t, base.StatusOK, res.StatusCode)
+
+			nconn.Close()
+
+			<-sessionClosed
+			<-connClosed
+		})
+	}
 }

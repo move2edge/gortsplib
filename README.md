@@ -15,19 +15,20 @@ Features:
 * Client
   * Query servers about available streams
   * Encrypt connection with TLS (RTSPS)
-  * Reading
+  * Read
     * Read streams from servers with UDP or TCP
-    * Switch protocol automatically (switch to TCP in case of code 451 or UDP timeout)
+    * Switch protocol automatically (switch to TCP in case of server error or UDP timeout)
     * Read only selected tracks of a stream
     * Pause reading without disconnecting from the server
     * Generate RTCP receiver reports automatically
-  * Publishing
+  * Publish
     * Publish streams to servers with UDP or TCP
-    * Switch protocol automatically (switch to TCP in case of code 451)
+    * Switch protocol automatically (switch to TCP in case of server error)
     * Pause publishing without disconnecting from the server
     * Generate RTCP sender reports automatically
 * Server
   * Handle requests from clients
+  * Sessions and connections are independent; clients can control multiple sessions
   * Read streams from clients with UDP or TCP
   * Write streams to clients with UDP or TCP
   * Encrypt streams with TLS (RTSPS)
@@ -53,7 +54,6 @@ Features:
 * [client-publish-options](examples/client-publish-options/main.go)
 * [client-publish-pause](examples/client-publish-pause/main.go)
 * [server](examples/server/main.go)
-* [server-udp](examples/server-udp/main.go)
 * [server-tls](examples/server-tls/main.go)
 
 ## API Documentation

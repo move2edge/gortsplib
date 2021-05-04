@@ -15,131 +15,134 @@ import (
 // 2. allow a single client to publish a stream with TCP
 // 3. allow multiple clients to read that stream with TCP
 
-var mutex sync.Mutex
-var publisher *gortsplib.ServerConn
-var readers = make(map[*gortsplib.ServerConn]struct{})
-var sdp []byte
+type serverHandler struct {
+	mutex     sync.Mutex
+	publisher *gortsplib.ServerSession
+	readers   map[*gortsplib.ServerSession]struct{}
+	sdp       []byte
+}
 
-// this is called for each incoming connection
-func handleConn(conn *gortsplib.ServerConn) {
-	defer conn.Close()
+// called when a connection is opened.
+func (sh *serverHandler) OnConnOpen(sc *gortsplib.ServerConn) {
+	log.Printf("conn opened")
+}
 
-	log.Printf("client connected")
+// called when a connection is closed.
+func (sh *serverHandler) OnConnClose(sc *gortsplib.ServerConn, err error) {
+	log.Printf("conn closed (%v)", err)
+}
 
-	// called after receiving a DESCRIBE request.
-	onDescribe := func(ctx *gortsplib.ServerConnDescribeCtx) (*base.Response, []byte, error) {
-		mutex.Lock()
-		defer mutex.Unlock()
+// called when a session is opened.
+func (sh *serverHandler) OnSessionOpen(ss *gortsplib.ServerSession) {
+	log.Printf("session opened")
+}
 
-		// no one is publishing yet
-		if publisher == nil {
-			return &base.Response{
-				StatusCode: base.StatusNotFound,
-			}, nil, nil
-		}
+// called when a session is closed.
+func (sh *serverHandler) OnSessionClose(ss *gortsplib.ServerSession, err error) {
+	log.Printf("session closed")
 
-		return &base.Response{
-			StatusCode: base.StatusOK,
-		}, sdp, nil
-	}
+	sh.mutex.Lock()
+	defer sh.mutex.Unlock()
 
-	// called after receiving an ANNOUNCE request.
-	onAnnounce := func(ctx *gortsplib.ServerConnAnnounceCtx) (*base.Response, error) {
-		mutex.Lock()
-		defer mutex.Unlock()
-
-		if publisher != nil {
-			return &base.Response{
-				StatusCode: base.StatusBadRequest,
-			}, fmt.Errorf("someone is already publishing")
-		}
-
-		publisher = conn
-		sdp = ctx.Tracks.Write()
-
-		return &base.Response{
-			StatusCode: base.StatusOK,
-			Header: base.Header{
-				"Session": base.HeaderValue{"12345678"},
-			},
-		}, nil
-	}
-
-	// called after receiving a SETUP request.
-	onSetup := func(ctx *gortsplib.ServerConnSetupCtx) (*base.Response, error) {
-		return &base.Response{
-			StatusCode: base.StatusOK,
-			Header: base.Header{
-				"Session": base.HeaderValue{"12345678"},
-			},
-		}, nil
-	}
-
-	// called after receiving a PLAY request.
-	onPlay := func(ctx *gortsplib.ServerConnPlayCtx) (*base.Response, error) {
-		mutex.Lock()
-		defer mutex.Unlock()
-
-		readers[conn] = struct{}{}
-
-		return &base.Response{
-			StatusCode: base.StatusOK,
-			Header: base.Header{
-				"Session": base.HeaderValue{"12345678"},
-			},
-		}, nil
-	}
-
-	// called after receiving a RECORD request.
-	onRecord := func(ctx *gortsplib.ServerConnRecordCtx) (*base.Response, error) {
-		mutex.Lock()
-		defer mutex.Unlock()
-
-		if conn != publisher {
-			return &base.Response{
-				StatusCode: base.StatusBadRequest,
-			}, fmt.Errorf("someone is already publishing")
-		}
-
-		return &base.Response{
-			StatusCode: base.StatusOK,
-			Header: base.Header{
-				"Session": base.HeaderValue{"12345678"},
-			},
-		}, nil
-	}
-
-	// called after receiving a frame.
-	onFrame := func(trackID int, typ gortsplib.StreamType, buf []byte) {
-		mutex.Lock()
-		defer mutex.Unlock()
-
-		// if we are the publisher, route frames to readers
-		if conn == publisher {
-			for r := range readers {
-				r.WriteFrame(trackID, typ, buf)
-			}
-		}
-	}
-
-	err := <-conn.Read(gortsplib.ServerConnReadHandlers{
-		OnDescribe: onDescribe,
-		OnAnnounce: onAnnounce,
-		OnSetup:    onSetup,
-		OnPlay:     onPlay,
-		OnRecord:   onRecord,
-		OnFrame:    onFrame,
-	})
-	log.Printf("client disconnected (%s)", err)
-
-	mutex.Lock()
-	defer mutex.Unlock()
-
-	if conn == publisher {
-		publisher = nil
-		sdp = nil
+	if ss == sh.publisher {
+		sh.publisher = nil
+		sh.sdp = nil
 	} else {
-		delete(readers, conn)
+		delete(sh.readers, ss)
+	}
+}
+
+// called after receiving a DESCRIBE request.
+func (sh *serverHandler) OnDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, []byte, error) {
+	log.Printf("describe request")
+
+	sh.mutex.Lock()
+	defer sh.mutex.Unlock()
+
+	// no one is publishing yet
+	if sh.publisher == nil {
+		return &base.Response{
+			StatusCode: base.StatusNotFound,
+		}, nil, nil
+	}
+
+	return &base.Response{
+		StatusCode: base.StatusOK,
+	}, sh.sdp, nil
+}
+
+// called after receiving an ANNOUNCE request.
+func (sh *serverHandler) OnAnnounce(ctx *gortsplib.ServerHandlerOnAnnounceCtx) (*base.Response, error) {
+	log.Printf("announce request")
+
+	sh.mutex.Lock()
+	defer sh.mutex.Unlock()
+
+	if sh.publisher != nil {
+		return &base.Response{
+			StatusCode: base.StatusBadRequest,
+		}, fmt.Errorf("someone is already publishing")
+	}
+
+	sh.publisher = ctx.Session
+	sh.sdp = ctx.Tracks.Write()
+
+	return &base.Response{
+		StatusCode: base.StatusOK,
+	}, nil
+}
+
+// called after receiving a SETUP request.
+func (sh *serverHandler) OnSetup(ctx *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, error) {
+	log.Printf("setup request")
+
+	return &base.Response{
+		StatusCode: base.StatusOK,
+	}, nil
+}
+
+// called after receiving a PLAY request.
+func (sh *serverHandler) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
+	log.Printf("play request")
+
+	sh.mutex.Lock()
+	defer sh.mutex.Unlock()
+
+	sh.readers[ctx.Session] = struct{}{}
+
+	return &base.Response{
+		StatusCode: base.StatusOK,
+	}, nil
+}
+
+// called after receiving a RECORD request.
+func (sh *serverHandler) OnRecord(ctx *gortsplib.ServerHandlerOnRecordCtx) (*base.Response, error) {
+	log.Printf("record request")
+
+	sh.mutex.Lock()
+	defer sh.mutex.Unlock()
+
+	if ctx.Session != sh.publisher {
+		return &base.Response{
+			StatusCode: base.StatusBadRequest,
+		}, fmt.Errorf("someone is already publishing")
+	}
+
+	return &base.Response{
+		StatusCode: base.StatusOK,
+	}, nil
+}
+
+// called after receiving a frame.
+func (sh *serverHandler) OnFrame(ctx *gortsplib.ServerHandlerOnFrameCtx) {
+	sh.mutex.Lock()
+	defer sh.mutex.Unlock()
+
+	// if we are the publisher, route frames to readers
+	if ctx.Session == sh.publisher {
+		for r := range sh.readers {
+			r.WriteFrame(ctx.TrackID, ctx.StreamType, ctx.Payload)
+		}
 	}
 }
 
@@ -151,24 +154,14 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	conf := gortsplib.ServerConf{
+
+	// configure server
+	s := &gortsplib.Server{
+		Handler:   &serverHandler{readers: make(map[*gortsplib.ServerSession]struct{})},
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
 	}
 
-	// create server
-	s, err := conf.Serve(":8554")
-	if err != nil {
-		panic(err)
-	}
+	// start server and wait until a fatal error
 	log.Printf("server is ready")
-
-	// accept connections
-	for {
-		conn, err := s.Accept()
-		if err != nil {
-			panic(err)
-		}
-
-		go handleConn(conn)
-	}
+	panic(s.StartAndWait(":8554"))
 }

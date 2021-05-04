@@ -24,7 +24,7 @@ type bufAddrPair struct {
 }
 
 type clientData struct {
-	sc           *ServerConn
+	ss           *ServerSession
 	trackID      int
 	isPublishing bool
 	streamType   StreamType
@@ -144,6 +144,7 @@ func (s *serverUDPListener) handleNat(n int, addr *net.UDPAddr, buf []byte) (*cl
 }
 
 type serverUDPListener struct {
+	s            *Server
 	pc           *net.UDPConn
 	streamType   StreamType
 	writeTimeout time.Duration
@@ -157,7 +158,7 @@ type serverUDPListener struct {
 }
 
 func newServerUDPListener(
-	conf ServerConf,
+	s *Server,
 	address string,
 	streamType StreamType) (*serverUDPListener, error) {
 
@@ -172,30 +173,31 @@ func newServerUDPListener(
 		return nil, err
 	}
 
-	s := &serverUDPListener{
+	u := &serverUDPListener{
+		s:       s,
 		pc:      pc,
 		clients: make(map[clientAddr]*clientData),
 		done:    make(chan struct{}),
 	}
 
-	s.streamType = streamType
-	s.writeTimeout = conf.WriteTimeout
-	s.readBuf = multibuffer.New(uint64(conf.ReadBufferCount), uint64(conf.ReadBufferSize))
-	s.ringBuffer = ringbuffer.New(uint64(conf.ReadBufferCount))
+	u.streamType = streamType
+	u.writeTimeout = s.WriteTimeout
+	u.readBuf = multibuffer.New(uint64(s.ReadBufferCount), uint64(s.ReadBufferSize))
+	u.ringBuffer = ringbuffer.New(uint64(s.ReadBufferCount))
 
-	go s.run()
+	go u.run()
 
-	return s, nil
+	return u, nil
 }
 
-func (s *serverUDPListener) close() {
-	s.pc.Close()
-	s.ringBuffer.Close()
-	<-s.done
+func (u *serverUDPListener) close() {
+	u.pc.Close()
+	u.ringBuffer.Close()
+	<-u.done
 }
 
-func (s *serverUDPListener) run() {
-	defer close(s.done)
+func (u *serverUDPListener) run() {
+	defer close(u.done)
 
 	var wg sync.WaitGroup
 
@@ -204,19 +206,19 @@ func (s *serverUDPListener) run() {
 		defer wg.Done()
 
 		for {
-			buf := s.readBuf.Next()
-			n, addr, err := s.pc.ReadFromUDP(buf)
+			buf := u.readBuf.Next()
+			n, addr, err := u.pc.ReadFromUDP(buf)
 			if err != nil {
 				break
 			}
 
 			func() {
-				s.clientsMutex.RLock()
-				defer s.clientsMutex.RUnlock()
+				u.clientsMutex.RLock()
+				defer u.clientsMutex.RUnlock()
 
 				var clientAddr clientAddr
 				clientAddr.fill(addr.IP, addr.Port)
-				clientData, ok := s.clients[clientAddr]
+				clientData, ok := u.clients[clientAddr]
 				if !ok {
 					clientData, err = s.handleNat(n, addr, buf)
 					if err != nil {
@@ -230,7 +232,14 @@ func (s *serverUDPListener) run() {
 					clientData.sc.announcedTracks[clientData.trackID].rtcpReceiver.ProcessFrame(now, s.streamType, buf[:n])
 				}
 
-				clientData.sc.readHandlers.OnFrame(clientData.trackID, s.streamType, buf[:n], now)
+				if h, ok := u.s.Handler.(ServerHandlerOnFrame); ok {
+					h.OnFrame(&ServerHandlerOnFrameCtx{
+						Session:    clientData.ss,
+						TrackID:    clientData.trackID,
+						StreamType: u.streamType,
+						Payload:    buf[:n],
+					})
+				}
 			}()
 		}
 	}()
@@ -273,10 +282,7 @@ func (s *serverUDPListener) addClient(ip net.IP, port int, sc *ServerConn, track
 		sc:           sc,
 		trackID:      trackID,
 		isPublishing: isPublishing,
-		streamType:   s.streamType,
-		isMapped:     false,
 	}
-	s.printClientList(fmt.Sprintf("%s", Green("add")), addr)
 }
 
 func (s *serverUDPListener) removeClient(ip net.IP, port int) {
@@ -286,16 +292,5 @@ func (s *serverUDPListener) removeClient(ip net.IP, port int) {
 	var addr clientAddr
 	addr.fill(ip, port)
 
-	s.printClientList(fmt.Sprintf("%s", Red("remove")), addr)
-	clientData, ok := s.clients[addr]
-	if ok {
-		if clientData.isPublishing {
-			for client := range s.clients {
-				delete(s.clients, client)
-			}
-
-		} else {
-			delete(s.clients, addr)
-		}
-	}
+	delete(s.clients, addr)
 }
