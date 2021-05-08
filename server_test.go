@@ -15,6 +15,19 @@ import (
 	"github.com/aler9/gortsplib/pkg/headers"
 )
 
+func readResponse(br *bufio.Reader) (*base.Response, error) {
+	var res base.Response
+	err := res.Read(br)
+	return &res, err
+}
+
+func readResponseIgnoreFrames(br *bufio.Reader) (*base.Response, error) {
+	buf := make([]byte, 2048)
+	var res base.Response
+	err := res.ReadIgnoreFrames(br, buf)
+	return &res, err
+}
+
 type testServerHandler struct {
 	onConnOpen     func(*ServerConn)
 	onConnClose    func(*ServerConn, error)
@@ -427,6 +440,31 @@ func TestServerErrorWrongUDPPorts(t *testing.T) {
 	})
 }
 
+func TestServerConnClose(t *testing.T) {
+	connClosed := make(chan struct{})
+
+	s := &Server{
+		Handler: &testServerHandler{
+			onConnOpen: func(sc *ServerConn) {
+				sc.Close()
+			},
+			onConnClose: func(sc *ServerConn, err error) {
+				close(connClosed)
+			},
+		},
+	}
+
+	err := s.Start("127.0.0.1:8554")
+	require.NoError(t, err)
+	defer s.Close()
+
+	conn, err := net.Dial("tcp", "localhost:8554")
+	require.NoError(t, err)
+	defer conn.Close()
+
+	<-connClosed
+}
+
 func TestServerCSeq(t *testing.T) {
 	s := &Server{}
 	err := s.Start("127.0.0.1:8554")
@@ -447,8 +485,7 @@ func TestServerCSeq(t *testing.T) {
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
 
-	var res base.Response
-	err = res.Read(bconn.Reader)
+	res, err := readResponse(bconn.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusOK, res.StatusCode)
 
@@ -456,9 +493,12 @@ func TestServerCSeq(t *testing.T) {
 }
 
 func TestServerErrorCSeqMissing(t *testing.T) {
+	connClosed := make(chan struct{})
+
 	h := &testServerHandler{
 		onConnClose: func(sc *ServerConn, err error) {
 			require.Equal(t, "CSeq is missing", err.Error())
+			close(connClosed)
 		},
 	}
 
@@ -479,16 +519,17 @@ func TestServerErrorCSeqMissing(t *testing.T) {
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
 
-	var res base.Response
-	err = res.Read(bconn.Reader)
+	res, err := readResponse(bconn.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusBadRequest, res.StatusCode)
+
+	<-connClosed
 }
 
 func TestServerErrorInvalidMethod(t *testing.T) {
 	h := &testServerHandler{
 		onConnClose: func(sc *ServerConn, err error) {
-			require.Equal(t, "unhandled request", err.Error())
+			require.Equal(t, "unhandled request (INVALID rtsp://localhost:8554/)", err.Error())
 		},
 	}
 
@@ -511,8 +552,7 @@ func TestServerErrorInvalidMethod(t *testing.T) {
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
 
-	var res base.Response
-	err = res.Read(bconn.Reader)
+	res, err := readResponse(bconn.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusBadRequest, res.StatusCode)
 }
@@ -568,8 +608,7 @@ func TestServerErrorTCPTwoConnOneSession(t *testing.T) {
 	}.Write(bconn1.Writer)
 	require.NoError(t, err)
 
-	var res base.Response
-	err = res.Read(bconn1.Reader)
+	res, err := readResponse(bconn1.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusOK, res.StatusCode)
 
@@ -583,7 +622,7 @@ func TestServerErrorTCPTwoConnOneSession(t *testing.T) {
 	}.Write(bconn1.Writer)
 	require.NoError(t, err)
 
-	err = res.Read(bconn1.Reader)
+	res, err = readResponse(bconn1.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusOK, res.StatusCode)
 
@@ -614,7 +653,7 @@ func TestServerErrorTCPTwoConnOneSession(t *testing.T) {
 	}.Write(bconn2.Writer)
 	require.NoError(t, err)
 
-	err = res.Read(bconn2.Reader)
+	res, err = readResponse(bconn2.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusBadRequest, res.StatusCode)
 }
@@ -670,8 +709,7 @@ func TestServerErrorTCPOneConnTwoSessions(t *testing.T) {
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
 
-	var res base.Response
-	err = res.Read(bconn.Reader)
+	res, err := readResponse(bconn.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusOK, res.StatusCode)
 
@@ -685,7 +723,7 @@ func TestServerErrorTCPOneConnTwoSessions(t *testing.T) {
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
 
-	err = res.Read(bconn.Reader)
+	res, err = readResponse(bconn.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusOK, res.StatusCode)
 
@@ -710,7 +748,7 @@ func TestServerErrorTCPOneConnTwoSessions(t *testing.T) {
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
 
-	err = res.Read(bconn.Reader)
+	res, err = readResponse(bconn.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusBadRequest, res.StatusCode)
 }
@@ -753,8 +791,7 @@ func TestServerGetSetParameter(t *testing.T) {
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
 
-	var res base.Response
-	err = res.Read(bconn.Reader)
+	res, err := readResponse(bconn.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusOK, res.StatusCode)
 
@@ -768,7 +805,7 @@ func TestServerGetSetParameter(t *testing.T) {
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
 
-	err = res.Read(bconn.Reader)
+	res, err = readResponse(bconn.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusOK, res.StatusCode)
 
@@ -782,7 +819,7 @@ func TestServerGetSetParameter(t *testing.T) {
 	}.Write(bconn.Writer)
 	require.NoError(t, err)
 
-	err = res.Read(bconn.Reader)
+	res, err = readResponse(bconn.Reader)
 	require.NoError(t, err)
 	require.Equal(t, base.StatusOK, res.StatusCode)
 	require.Equal(t, []byte("param1: 123456\r\n"), res.Body)
@@ -834,10 +871,61 @@ func TestServerErrorInvalidSession(t *testing.T) {
 			}.Write(bconn.Writer)
 			require.NoError(t, err)
 
-			var res base.Response
-			err = res.Read(bconn.Reader)
+			res, err := readResponse(bconn.Reader)
 			require.NoError(t, err)
 			require.Equal(t, base.StatusBadRequest, res.StatusCode)
 		})
 	}
+}
+
+func TestServerSessionClose(t *testing.T) {
+	sessionClosed := make(chan struct{})
+
+	s := &Server{
+		Handler: &testServerHandler{
+			onSessionOpen: func(ss *ServerSession) {
+				ss.Close()
+			},
+			onSessionClose: func(ss *ServerSession, err error) {
+				close(sessionClosed)
+			},
+			onSetup: func(ctx *ServerHandlerOnSetupCtx) (*base.Response, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+		},
+	}
+
+	err := s.Start("127.0.0.1:8554")
+	require.NoError(t, err)
+	defer s.Close()
+
+	conn, err := net.Dial("tcp", "localhost:8554")
+	require.NoError(t, err)
+	defer conn.Close()
+	bconn := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+
+	err = base.Request{
+		Method: base.Setup,
+		URL:    base.MustParseURL("rtsp://localhost:8554/teststream/trackID=0"),
+		Header: base.Header{
+			"CSeq": base.HeaderValue{"1"},
+			"Transport": headers.Transport{
+				Protocol: StreamProtocolTCP,
+				Delivery: func() *base.StreamDelivery {
+					v := base.StreamDeliveryUnicast
+					return &v
+				}(),
+				Mode: func() *headers.TransportMode {
+					v := headers.TransportModePlay
+					return &v
+				}(),
+				InterleavedIDs: &[2]int{0, 1},
+			}.Write(),
+		},
+	}.Write(bconn.Writer)
+	require.NoError(t, err)
+
+	<-sessionClosed
 }

@@ -3,7 +3,6 @@ package gortsplib
 import (
 	"bufio"
 	"crypto/tls"
-	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -279,7 +278,8 @@ type ServerConn struct {
 	udpTimeout                int32
 
 	// in
-	terminate chan struct{}
+	innerTerminate chan struct{}
+	terminate      chan struct{}
 }
 
 func newServerConn(conf ServerConf,
@@ -293,17 +293,12 @@ func newServerConn(conf ServerConf,
 		return nconn
 	}()
 
-	return &ServerConn{
-		conf:            conf,
-		udpRTPListener:  udpRTPListener,
-		udpRTCPListener: udpRTCPListener,
-		nconn:           nconn,
-		br:              bufio.NewReaderSize(conn, serverConnReadBufferSize),
-		bw:              bufio.NewWriterSize(conn, serverConnWriteBufferSize),
-		// always instantiate to allow writing to it before Play()
-		tcpFrameWriteBuffer:    ringbuffer.New(uint64(conf.ReadBufferCount)),
-		tcpBackgroundWriteDone: make(chan struct{}),
-		terminate:              make(chan struct{}),
+	sc := &ServerConn{
+		s:              s,
+		wg:             wg,
+		nconn:          nconn,
+		innerTerminate: make(chan struct{}, 1),
+		terminate:      make(chan struct{}),
 	}
 }
 
@@ -314,9 +309,18 @@ func (sc *ServerConn) Close() error {
 	return err
 }
 
-// State returns the state.
-func (sc *ServerConn) State() ServerConnState {
-	return sc.state
+// Close closes the ServerConn.
+func (sc *ServerConn) Close() error {
+	select {
+	case sc.innerTerminate <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// NetConn returns the underlying net.Conn.
+func (sc *ServerConn) NetConn() net.Conn {
+	return sc.nconn
 }
 
 // StreamProtocol returns the stream protocol of the setupped tracks.
@@ -394,23 +398,10 @@ func (sc *ServerConn) frameModeEnable() {
 			}
 		}
 
-	case ServerConnStateRecord:
-		if *sc.setupProtocol == StreamProtocolTCP {
-			sc.doEnableTCPFrame = true
-			sc.tcpFrameTimeout = true
+			sc.nconn.Close()
 
-		} else {
-			for trackID, track := range sc.setuppedTracks {
-				sc.udpRTPListener.addClient(sc.ip(), track.udpRTPPort, sc, trackID, true)
-				sc.udpRTCPListener.addClient(sc.ip(), track.udpRTCPPort, sc, trackID, true)
-
-				// open the firewall by sending packets to the counterpart
-				sc.WriteFrame(trackID, StreamTypeRTP,
-					[]byte{0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})
-				sc.WriteFrame(trackID, StreamTypeRTCP,
-					[]byte{0x80, 0xc9, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00})
-			}
-		}
+			sc.s.connClose <- sc
+			<-sc.terminate
 
 		sc.backgroundRecordTerminate = make(chan struct{})
 		sc.backgroundRecordDone = make(chan struct{})
@@ -418,14 +409,23 @@ func (sc *ServerConn) frameModeEnable() {
 	}
 }
 
-func (sc *ServerConn) frameModeDisable() {
-	switch sc.state {
-	case ServerConnStatePlay:
-		if *sc.setupProtocol == StreamProtocolTCP {
-			sc.tcpFrameEnabled = false
-			sc.tcpFrameWriteBuffer.Close()
-			<-sc.tcpBackgroundWriteDone
-			sc.tcpFrameWriteBuffer.Reset()
+		case <-sc.innerTerminate:
+			sc.nconn.Close()
+			<-readDone
+
+			if sc.tcpFrameEnabled {
+				sc.tcpFrameWriteBuffer.Close()
+				<-sc.tcpFrameBackgroundWriteDone
+			}
+
+			sc.s.connClose <- sc
+			<-sc.terminate
+
+			return liberrors.ErrServerTerminated{}
+
+		case <-sc.terminate:
+			sc.nconn.Close()
+			<-readDone
 
 		} else {
 			for _, track := range sc.setuppedTracks {
@@ -469,23 +469,21 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 
 	switch req.Method {
 	case base.Options:
-		if sc.readHandlers.OnOptions != nil {
-			pathAndQuery, ok := req.URL.RTSPPath()
-			if !ok {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerNoPath{}
+		// handle request in session
+		if sxID != "" {
+			cres := make(chan sessionReqRes)
+			sc.s.sessionReq <- sessionReq{
+				sc:     sc,
+				req:    req,
+				id:     sxID,
+				create: false,
+				res:    cres,
 			}
-
-			path, query := base.PathSplitQuery(pathAndQuery)
-
-			return sc.readHandlers.OnOptions(&ServerConnOptionsCtx{
-				Req:   req,
-				Path:  path,
-				Query: query,
-			})
+			res := <-cres
+			return res.res, res.err
 		}
 
+		// handle request here
 		var methods []string
 		if sc.readHandlers.OnDescribe != nil {
 			methods = append(methods, string(base.Describe))
@@ -558,379 +556,88 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 		}
 
 	case base.Announce:
-		if sc.readHandlers.OnAnnounce != nil {
-			err := sc.checkState(map[ServerConnState]struct{}{
-				ServerConnStateInitial: {},
-			})
-			if err != nil {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, err
+		if _, ok := sc.s.Handler.(ServerHandlerOnAnnounce); ok {
+			cres := make(chan sessionReqRes)
+			sc.s.sessionReq <- sessionReq{
+				sc:     sc,
+				req:    req,
+				id:     sxID,
+				create: true,
+				res:    cres,
 			}
-
-			ct, ok := req.Header["Content-Type"]
-			if !ok || len(ct) != 1 {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerContentTypeMissing{}
-			}
-
-			if ct[0] != "application/sdp" {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerContentTypeUnsupported{CT: ct}
-			}
-
-			tracks, err := ReadTracks(req.Body, req.URL)
-			if err != nil {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerSDPInvalid{Err: err}
-			}
-
-			if len(tracks) == 0 {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerSDPNoTracksDefined{}
-			}
-
-			pathAndQuery, ok := req.URL.RTSPPath()
-			if !ok {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerNoPath{}
-			}
-
-			path, query := base.PathSplitQuery(pathAndQuery)
-
-			for _, track := range tracks {
-				trackURL, err := track.URL()
-				if err != nil {
-					return &base.Response{
-						StatusCode: base.StatusBadRequest,
-					}, fmt.Errorf("unable to generate track URL")
-				}
-
-				trackPath, ok := trackURL.RTSPPath()
-				if !ok {
-					return &base.Response{
-						StatusCode: base.StatusBadRequest,
-					}, fmt.Errorf("invalid track URL (%v)", trackURL)
-				}
-
-				if !strings.HasPrefix(trackPath, path) {
-					return &base.Response{
-							StatusCode: base.StatusBadRequest,
-						}, fmt.Errorf("invalid track path: must begin with '%s', but is '%s'",
-							path, trackPath)
-				}
-			}
-
-			res, err := sc.readHandlers.OnAnnounce(&ServerConnAnnounceCtx{
-				Req:    req,
-				Path:   path,
-				Query:  query,
-				Tracks: tracks,
-			})
-
-			if res.StatusCode == base.StatusOK {
-				sc.state = ServerConnStatePreRecord
-				sc.setupPath = &path
-				sc.setupQuery = &query
-
-				sc.announcedTracks = make([]ServerConnAnnouncedTrack, len(tracks))
-				for trackID, track := range tracks {
-					clockRate, _ := track.ClockRate()
-					v := time.Now().Unix()
-
-					sc.announcedTracks[trackID] = ServerConnAnnouncedTrack{
-						track:            track,
-						rtcpReceiver:     rtcpreceiver.New(nil, clockRate),
-						udpLastFrameTime: &v,
-					}
-				}
-			}
-
-			return res, err
+			res := <-cres
+			return res.res, res.err
 		}
 
 	case base.Setup:
-		if sc.readHandlers.OnSetup != nil {
-			err := sc.checkState(map[ServerConnState]struct{}{
-				ServerConnStateInitial:   {},
-				ServerConnStatePrePlay:   {},
-				ServerConnStatePreRecord: {},
-			})
-			if err != nil {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, err
+		if _, ok := sc.s.Handler.(ServerHandlerOnSetup); ok {
+			cres := make(chan sessionReqRes)
+			sc.s.sessionReq <- sessionReq{
+				sc:     sc,
+				req:    req,
+				id:     sxID,
+				create: true,
+				res:    cres,
 			}
-
-			var th headers.Transport
-			err = th.Read(req.Header["Transport"])
-			if err != nil {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerTransportHeaderInvalid{Err: err}
-			}
-
-			if th.Delivery != nil && *th.Delivery == base.StreamDeliveryMulticast {
-				return &base.Response{
-					StatusCode: base.StatusUnsupportedTransport,
-				}, nil
-			}
-
-			trackID, path, query, err := setupGetTrackIDPathQuery(req.URL, th.Mode,
-				sc.announcedTracks, sc.setupPath, sc.setupQuery)
-			if err != nil {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, err
-			}
-
-			if _, ok := sc.setuppedTracks[trackID]; ok {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerTrackAlreadySetup{TrackID: trackID}
-			}
-
-			switch sc.state {
-			case ServerConnStateInitial, ServerConnStatePrePlay: // play
-				if th.Mode != nil && *th.Mode != headers.TransportModePlay {
-					return &base.Response{
-						StatusCode: base.StatusBadRequest,
-					}, liberrors.ErrServerTransportHeaderWrongMode{Mode: th.Mode}
-				}
-
-			default: // record
-				if th.Mode == nil || *th.Mode != headers.TransportModeRecord {
-					return &base.Response{
-						StatusCode: base.StatusBadRequest,
-					}, liberrors.ErrServerTransportHeaderWrongMode{Mode: th.Mode}
-				}
-			}
-
-			if th.Protocol == StreamProtocolUDP {
-				if sc.udpRTPListener == nil {
-					return &base.Response{
-						StatusCode: base.StatusUnsupportedTransport,
-					}, nil
-				}
-
-				if th.ClientPorts == nil {
-					return &base.Response{
-						StatusCode: base.StatusBadRequest,
-					}, liberrors.ErrServerTransportHeaderNoClientPorts{}
-				}
-
-			} else {
-				if th.InterleavedIDs == nil {
-					return &base.Response{
-						StatusCode: base.StatusBadRequest,
-					}, liberrors.ErrServerTransportHeaderNoInterleavedIDs{}
-				}
-
-				if th.InterleavedIDs[0] != (trackID*2) ||
-					th.InterleavedIDs[1] != (1+trackID*2) {
-					return &base.Response{
-							StatusCode: base.StatusBadRequest,
-						}, liberrors.ErrServerTransportHeaderWrongInterleavedIDs{
-							Expected: [2]int{(trackID * 2), (1 + trackID*2)}, Value: *th.InterleavedIDs}
-				}
-			}
-
-			if sc.setupProtocol != nil && *sc.setupProtocol != th.Protocol {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerTracksDifferentProtocols{}
-			}
-
-			res, err := sc.readHandlers.OnSetup(&ServerConnSetupCtx{
-				Req:       req,
-				Path:      path,
-				Query:     query,
-				TrackID:   trackID,
-				Transport: &th,
-			})
-
-			if res.StatusCode == base.StatusOK {
-				sc.setupProtocol = &th.Protocol
-
-				if sc.setuppedTracks == nil {
-					sc.setuppedTracks = make(map[int]ServerConnSetuppedTrack)
-				}
-
-				if th.Protocol == StreamProtocolUDP {
-					sc.setuppedTracks[trackID] = ServerConnSetuppedTrack{
-						udpRTPPort:  th.ClientPorts[0],
-						udpRTCPPort: th.ClientPorts[1],
-					}
-
-					if res.Header == nil {
-						res.Header = make(base.Header)
-					}
-					res.Header["Transport"] = headers.Transport{
-						Protocol: StreamProtocolUDP,
-						Delivery: func() *base.StreamDelivery {
-							v := base.StreamDeliveryUnicast
-							return &v
-						}(),
-						ClientPorts: th.ClientPorts,
-						ServerPorts: &[2]int{sc.udpRTPListener.port(), sc.udpRTCPListener.port()},
-					}.Write()
-
-				} else {
-					sc.setuppedTracks[trackID] = ServerConnSetuppedTrack{}
-
-					if res.Header == nil {
-						res.Header = make(base.Header)
-					}
-					res.Header["Transport"] = headers.Transport{
-						Protocol:       StreamProtocolTCP,
-						InterleavedIDs: th.InterleavedIDs,
-					}.Write()
-				}
-			}
-
-			if sc.state == ServerConnStateInitial {
-				sc.state = ServerConnStatePrePlay
-				sc.setupPath = &path
-				sc.setupQuery = &query
-			}
-
-			// workaround to prevent a bug in rtspclientsink
-			// that makes impossible for the client to receive the response
-			// and send frames.
-			// this was causing problems during unit tests.
-			if ua, ok := req.Header["User-Agent"]; ok && len(ua) == 1 &&
-				strings.HasPrefix(ua[0], "GStreamer") {
-				select {
-				case <-time.After(1 * time.Second):
-				case <-sc.terminate:
-				}
-			}
-
-			return res, err
+			res := <-cres
+			return res.res, res.err
 		}
 
 	case base.Play:
-		if sc.readHandlers.OnPlay != nil {
-			// play can be sent twice, allow calling it even if we're already playing
-			err := sc.checkState(map[ServerConnState]struct{}{
-				ServerConnStatePrePlay: {},
-				ServerConnStatePlay:    {},
-			})
-			if err != nil {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, err
+		if _, ok := sc.s.Handler.(ServerHandlerOnPlay); ok {
+			cres := make(chan sessionReqRes)
+			sc.s.sessionReq <- sessionReq{
+				sc:     sc,
+				req:    req,
+				id:     sxID,
+				create: false,
+				res:    cres,
 			}
+			res := <-cres
 
-			if len(sc.setuppedTracks) == 0 {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerNoTracksSetup{}
-			}
-
-			pathAndQuery, ok := req.URL.RTSPPath()
-			if !ok {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerNoPath{}
-			}
-
-			// path can end with a slash due to Content-Base, remove it
-			pathAndQuery = strings.TrimSuffix(pathAndQuery, "/")
-
-			path, query := base.PathSplitQuery(pathAndQuery)
-
-			res, err := sc.readHandlers.OnPlay(&ServerConnPlayCtx{
-				Req:   req,
-				Path:  path,
-				Query: query,
-			})
-
-			if res.StatusCode == base.StatusOK && sc.state != ServerConnStatePlay {
-				sc.state = ServerConnStatePlay
-				sc.frameModeEnable()
+			if _, ok := res.err.(liberrors.ErrServerTCPFramesEnable); ok {
+				sc.tcpFrameLinkedSession = res.ss
+				sc.tcpFrameIsRecording = false
+				sc.tcpFrameSetEnabled = true
+				return res.res, nil
 			}
 
 			return res, err
 		}
 
 	case base.Record:
-		if sc.readHandlers.OnRecord != nil {
-			err := sc.checkState(map[ServerConnState]struct{}{
-				ServerConnStatePreRecord: {},
-			})
-			if err != nil {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, err
+		if _, ok := sc.s.Handler.(ServerHandlerOnRecord); ok {
+			cres := make(chan sessionReqRes)
+			sc.s.sessionReq <- sessionReq{
+				sc:     sc,
+				req:    req,
+				id:     sxID,
+				create: false,
+				res:    cres,
 			}
+			res := <-cres
 
-			if len(sc.setuppedTracks) == 0 {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerNoTracksSetup{}
-			}
-
-			if len(sc.setuppedTracks) != len(sc.announcedTracks) {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerNotAllAnnouncedTracksSetup{}
-			}
-
-			pathAndQuery, ok := req.URL.RTSPPath()
-			if !ok {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerNoPath{}
-			}
-
-			// path can end with a slash due to Content-Base, remove it
-			pathAndQuery = strings.TrimSuffix(pathAndQuery, "/")
-
-			path, query := base.PathSplitQuery(pathAndQuery)
-
-			res, err := sc.readHandlers.OnRecord(&ServerConnRecordCtx{
-				Req:   req,
-				Path:  path,
-				Query: query,
-			})
-
-			if res.StatusCode == base.StatusOK {
-				sc.state = ServerConnStateRecord
-				sc.frameModeEnable()
+			if _, ok := res.err.(liberrors.ErrServerTCPFramesEnable); ok {
+				sc.tcpFrameLinkedSession = res.ss
+				sc.tcpFrameIsRecording = true
+				sc.tcpFrameSetEnabled = true
+				return res.res, nil
 			}
 
 			return res, err
 		}
 
 	case base.Pause:
-		if sc.readHandlers.OnPause != nil {
-			err := sc.checkState(map[ServerConnState]struct{}{
-				ServerConnStatePrePlay:   {},
-				ServerConnStatePlay:      {},
-				ServerConnStatePreRecord: {},
-				ServerConnStateRecord:    {},
-			})
-			if err != nil {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, err
+		if _, ok := sc.s.Handler.(ServerHandlerOnPause); ok {
+			cres := make(chan sessionReqRes)
+			sc.s.sessionReq <- sessionReq{
+				sc:     sc,
+				req:    req,
+				id:     sxID,
+				create: false,
+				res:    cres,
 			}
-
-			pathAndQuery, ok := req.URL.RTSPPath()
-			if !ok {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerNoPath{}
-			}
-
-			// path can end with a slash due to Content-Base, remove it
-			pathAndQuery = strings.TrimSuffix(pathAndQuery, "/")
+			res := <-cres
 
 			path, query := base.PathSplitQuery(pathAndQuery)
 
@@ -940,37 +647,31 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 				Query: query,
 			})
 
-			if res.StatusCode == base.StatusOK {
-				switch sc.state {
-				case ServerConnStatePlay:
-					sc.frameModeDisable()
-					sc.state = ServerConnStatePrePlay
-
-				case ServerConnStateRecord:
-					sc.frameModeDisable()
-					sc.state = ServerConnStatePreRecord
-				}
-			}
-
-			return res, err
+	case base.Teardown:
+		cres := make(chan sessionReqRes)
+		sc.s.sessionReq <- sessionReq{
+			sc:     sc,
+			req:    req,
+			id:     sxID,
+			create: false,
+			res:    cres,
 		}
+		res := <-cres
+		return res.res, res.err
 
 	case base.GetParameter:
-		if sc.readHandlers.OnGetParameter != nil {
-			pathAndQuery, ok := req.URL.RTSPPath()
-			if !ok {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerNoPath{}
+		// handle request in session
+		if sxID != "" {
+			cres := make(chan sessionReqRes)
+			sc.s.sessionReq <- sessionReq{
+				sc:     sc,
+				req:    req,
+				id:     sxID,
+				create: false,
+				res:    cres,
 			}
-
-			path, query := base.PathSplitQuery(pathAndQuery)
-
-			return sc.readHandlers.OnGetParameter(&ServerConnGetParameterCtx{
-				Req:   req,
-				Path:  path,
-				Query: query,
-			})
+			res := <-cres
+			return res.res, res.err
 		}
 
 		// GET_PARAMETER is used like a ping
@@ -1025,10 +726,14 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 
 	return &base.Response{
 		StatusCode: base.StatusBadRequest,
-	}, fmt.Errorf("unhandled method: %v", req.Method)
+	}, liberrors.ErrServerUnhandledRequest{Req: req}
 }
 
 func (sc *ServerConn) handleRequestOuter(req *base.Request) error {
+	if h, ok := sc.s.Handler.(ServerHandlerOnRequest); ok {
+		h.OnRequest(sc, req)
+	}
+
 	res, err := sc.handleRequest(req)
 
 	if res.Header == nil {
@@ -1043,8 +748,8 @@ func (sc *ServerConn) handleRequestOuter(req *base.Request) error {
 	// add server
 	res.Header["Server"] = base.HeaderValue{"gortsplib"}
 
-	if sc.readHandlers.OnResponse != nil {
-		sc.readHandlers.OnResponse(res)
+	if h, ok := sc.s.Handler.(ServerHandlerOnResponse); ok {
+		h.OnResponse(sc, res)
 	}
 
 	switch {

@@ -9,6 +9,9 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/aler9/gortsplib/pkg/base"
+	"github.com/aler9/gortsplib/pkg/liberrors"
 )
 
 func extractPort(address string) (int, error) {
@@ -41,16 +44,40 @@ func newSessionID(sessions map[string]*ServerSession) (string, error) {
 	}
 }
 
-type sessionGetReq struct {
+type sessionReqRes struct {
+	res *base.Response
+	err error
+	ss  *ServerSession
+}
+
+type sessionReq struct {
+	sc     *ServerConn
+	req    *base.Request
 	id     string
 	create bool
-	res    chan *ServerSession
+	res    chan sessionReqRes
 }
 
 // Server is a RTSP server.
 type Server struct {
-	// an handler to handle requests.
+	//
+	// handler
+	//
+
+	// an handler interface to handle requests.
 	Handler ServerHandler
+
+	//
+	// connection
+	//
+
+	// timeout of read operations.
+	// It defaults to 10 seconds
+	ReadTimeout time.Duration
+
+	// timeout of write operations.
+	// It defaults to 10 seconds
+	WriteTimeout time.Duration
 
 	// a TLS configuration to accept TLS (RTSPS) connections.
 	TLSConfig *tls.Config
@@ -63,13 +90,9 @@ type Server struct {
 	// If UDPRTPAddress and UDPRTCPAddress are != "", the server can accept and send UDP streams.
 	UDPRTCPAddress string
 
-	// timeout of read operations.
-	// It defaults to 10 seconds
-	ReadTimeout time.Duration
-
-	// timeout of write operations.
-	// It defaults to 10 seconds
-	WriteTimeout time.Duration
+	//
+	// reading / writing
+	//
 
 	// read buffer count.
 	// If greater than 1, allows to pass buffers to routines different than the one
@@ -84,9 +107,21 @@ type Server struct {
 	// It defaults to 2048.
 	ReadBufferSize int
 
+	//
+	// system functions
+	//
+
 	// function used to initialize the TCP listener.
-	// It defaults to net.Listen
+	// It defaults to net.Listen.
 	Listen func(network string, address string) (net.Listener, error)
+
+	// function used to initialize UDP listeners.
+	// It defaults to net.ListenPacket.
+	ListenPacket func(network, address string) (net.PacketConn, error)
+
+	//
+	// private
+	//
 
 	receiverReportPeriod           time.Duration
 	closeSessionAfterNoRequestsFor time.Duration
@@ -100,7 +135,7 @@ type Server struct {
 
 	// in
 	connClose    chan *ServerConn
-	sessionGet   chan sessionGetReq
+	sessionReq   chan sessionReq
 	sessionClose chan *ServerSession
 	terminate    chan struct{}
 
@@ -110,12 +145,15 @@ type Server struct {
 
 // Start starts listening on the given address.
 func (s *Server) Start(address string) error {
+	// connection
 	if s.ReadTimeout == 0 {
 		s.ReadTimeout = 10 * time.Second
 	}
 	if s.WriteTimeout == 0 {
 		s.WriteTimeout = 10 * time.Second
 	}
+
+	// reading / writing
 	if s.ReadBufferCount == 0 {
 		s.ReadBufferCount = 512
 	}
@@ -123,10 +161,15 @@ func (s *Server) Start(address string) error {
 		s.ReadBufferSize = 2048
 	}
 
+	// system functions
 	if s.Listen == nil {
 		s.Listen = net.Listen
 	}
+	if s.ListenPacket == nil {
+		s.ListenPacket = net.ListenPacket
+	}
 
+	// private
 	if s.receiverReportPeriod == 0 {
 		s.receiverReportPeriod = 10 * time.Second
 	}
@@ -194,7 +237,7 @@ func (s *Server) run() {
 	s.sessions = make(map[string]*ServerSession)
 	s.conns = make(map[*ServerConn]struct{})
 	s.connClose = make(chan *ServerConn)
-	s.sessionGet = make(chan sessionGetReq)
+	s.sessionReq = make(chan sessionReq)
 	s.sessionClose = make(chan *ServerSession)
 
 	var wg sync.WaitGroup
@@ -233,25 +276,35 @@ outer:
 			}
 			s.doConnClose(sc)
 
-		case req := <-s.sessionGet:
+		case req := <-s.sessionReq:
 			if ss, ok := s.sessions[req.id]; ok {
-				req.res <- ss
+				ss.request <- req
 
 			} else {
 				if !req.create {
-					req.res <- nil
+					req.res <- sessionReqRes{
+						res: &base.Response{
+							StatusCode: base.StatusBadRequest,
+						},
+						err: liberrors.ErrServerSessionNotFound{},
+					}
 					continue
 				}
 
 				id, err := newSessionID(s.sessions)
 				if err != nil {
-					req.res <- nil
+					req.res <- sessionReqRes{
+						res: &base.Response{
+							StatusCode: base.StatusBadRequest,
+						},
+						err: fmt.Errorf("internal error"),
+					}
 					continue
 				}
 
 				ss := newServerSession(s, id, &wg)
 				s.sessions[id] = ss
-				req.res <- ss
+				ss.request <- req
 			}
 
 		case ss := <-s.sessionClose:
@@ -284,11 +337,16 @@ outer:
 					return
 				}
 
-			case req, ok := <-s.sessionGet:
+			case req, ok := <-s.sessionReq:
 				if !ok {
 					return
 				}
-				req.res <- nil
+				req.res <- sessionReqRes{
+					res: &base.Response{
+						StatusCode: base.StatusBadRequest,
+					},
+					err: liberrors.ErrServerTerminated{},
+				}
 
 			case _, ok := <-s.sessionClose:
 				if !ok {
@@ -321,7 +379,7 @@ outer:
 	close(acceptErr)
 	close(connNew)
 	close(s.connClose)
-	close(s.sessionGet)
+	close(s.sessionReq)
 	close(s.sessionClose)
 	close(s.done)
 }
