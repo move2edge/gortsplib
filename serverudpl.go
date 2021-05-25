@@ -115,7 +115,6 @@ func (s *serverUDPListener) updatePorts(isPublisher bool, streamType StreamType,
 			var clientAddr clientAddr
 			clientAddr.fill(addr.IP, addr.Port)
 			s.clients[clientAddr] = clientData
-			client.isMapped = true
 			s.printClientList(fmt.Sprintf("%s", Yellow("map")), clientAddr)
 			return clientData, nil
 		}
@@ -222,7 +221,9 @@ func (s *serverUDPListener) run() {
 					if err != nil {
 						return
 					}
-				}
+				} else if clientData.isMapped == false {
+          clientData.isMapped = true
+        }
 
 				now := time.Now()
 				if clientData.isPublishing {
