@@ -38,7 +38,7 @@ type clientAddr struct {
 
 func (s *serverUDPListener) LogInfo(msg ...interface{}) {
 	myAddr := s.pc.LocalAddr()
-	log.Info(Magenta(myAddr), " ", fmt.Sprint(msg...))
+	log.Debug(Magenta(myAddr), " ", fmt.Sprint(msg...))
 }
 
 func (p *clientAddr) fill(ip net.IP, port int) {
@@ -113,9 +113,9 @@ func (s *serverUDPListener) updatePorts(isPublisher bool, streamType StreamType,
 			clientData = client
 			delete(s.clients, address)
 			var clientAddr clientAddr
+      clientData.isMapped = true
 			clientAddr.fill(addr.IP, addr.Port)
 			s.clients[clientAddr] = clientData
-			client.isMapped = true
 			s.printClientList(fmt.Sprintf("%s", Yellow("map")), clientAddr)
 			return clientData, nil
 		}
@@ -224,7 +224,9 @@ func (u *serverUDPListener) run() {
 					if err != nil {
 						return
 					}
-				}
+				} else if clientData.isMapped == false {
+          clientData.isMapped = true
+        }
 
 				now := time.Now()
 				if clientData.isPublishing {
