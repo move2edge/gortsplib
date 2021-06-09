@@ -85,9 +85,13 @@ func (s *serverUDPListener) printMappingInfo(address clientAddr, client *clientD
 		pubStr = "C"
 	}
 	if client.streamType == StreamTypeRTP {
+		client.sc.trackMutex.Lock()
 		oldPort = client.sc.setuppedTracks[client.trackID].udpRTPPort
+		client.sc.trackMutex.Unlock()
 	} else {
+		client.sc.trackMutex.Lock()
 		oldPort = client.sc.setuppedTracks[client.trackID].udpRTCPPort
+		client.sc.trackMutex.Unlock()
 	}
 	s.LogInfo(Yellow("MAP:"), pubStr, client.streamType,
 		address.ip[(len(address.ip)-4):], oldPort, "->", incoming.IP, incoming.Port)
@@ -104,16 +108,23 @@ func (s *serverUDPListener) updatePorts(isPublisher bool, streamType StreamType,
 			var track ServerConnSetuppedTrack
 			if streamType == StreamTypeRTP {
 				track.udpRTPPort = addr.Port
+				client.sc.trackMutex.Lock()
 				track.udpRTCPPort = client.sc.setuppedTracks[client.trackID].udpRTCPPort
+				client.sc.trackMutex.Unlock()
 			} else {
+				client.sc.trackMutex.Lock()
 				track.udpRTPPort = client.sc.setuppedTracks[client.trackID].udpRTPPort
+				client.sc.trackMutex.Unlock()
 				track.udpRTCPPort = addr.Port
 			}
+
+			client.sc.trackMutex.Lock()
 			client.sc.setuppedTracks[client.trackID] = track
+			client.sc.trackMutex.Unlock()
 			clientData = client
 			delete(s.clients, address)
 			var clientAddr clientAddr
-      clientData.isMapped = true
+			clientData.isMapped = true
 			clientAddr.fill(addr.IP, addr.Port)
 			s.clients[clientAddr] = clientData
 			s.printClientList(fmt.Sprintf("%s", Yellow("map")), clientAddr)
@@ -223,8 +234,8 @@ func (s *serverUDPListener) run() {
 						return
 					}
 				} else if clientData.isMapped == false {
-          clientData.isMapped = true
-        }
+					clientData.isMapped = true
+				}
 
 				now := time.Now()
 				if clientData.isPublishing {

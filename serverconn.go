@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"sync"
 
 	"github.com/aler9/gortsplib/pkg/base"
 	"github.com/aler9/gortsplib/pkg/headers"
@@ -244,7 +245,7 @@ type ServerConnReadHandlers struct {
 	OnTeardown func(ctx *ServerConnTeardownCtx) (*base.Response, error)
 
 	// called after receiving a frame.
-  OnFrame func(trackID int, streamType StreamType, payload []byte, stamp time.Time)
+	OnFrame func(trackID int, streamType StreamType, payload []byte, stamp time.Time)
 }
 
 // ServerConn is a server-side RTSP connection.
@@ -260,6 +261,7 @@ type ServerConn struct {
 	setupProtocol   *StreamProtocol
 	setupPath       *string
 	setupQuery      *string
+	trackMutex      sync.RWMutex
 
 	// TCP stream protocol
 	doEnableTCPFrame       bool
@@ -760,14 +762,18 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 				sc.setupProtocol = &th.Protocol
 
 				if sc.setuppedTracks == nil {
+          sc.trackMutex.Lock()
 					sc.setuppedTracks = make(map[int]ServerConnSetuppedTrack)
+          sc.trackMutex.Unlock()
 				}
 
 				if th.Protocol == StreamProtocolUDP {
+          sc.trackMutex.Lock()
 					sc.setuppedTracks[trackID] = ServerConnSetuppedTrack{
 						udpRTPPort:  th.ClientPorts[0],
 						udpRTCPPort: th.ClientPorts[1],
 					}
+          sc.trackMutex.Unlock()
 
 					if res.Header == nil {
 						res.Header = make(base.Header)
@@ -783,7 +789,9 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 					}.Write()
 
 				} else {
+          sc.trackMutex.Lock()
 					sc.setuppedTracks[trackID] = ServerConnSetuppedTrack{}
+          sc.trackMutex.Unlock()
 
 					if res.Header == nil {
 						res.Header = make(base.Header)
@@ -799,7 +807,7 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 				sc.state = ServerConnStatePrePlay
 				sc.setupPath = &path
 				sc.setupQuery = &query
-        sc.frameModeEnable()
+				sc.frameModeEnable()
 			}
 
 			// workaround to prevent a bug in rtspclientsink
@@ -1105,12 +1113,12 @@ func (sc *ServerConn) backgroundRead() error {
 			case *base.InterleavedFrame:
 				// forward frame only if it has been set up
 				if _, ok := sc.setuppedTracks[frame.TrackID]; ok {
-          stamp := time.Now()
+					stamp := time.Now()
 					if sc.state == ServerConnStateRecord {
-            sc.announcedTracks[frame.TrackID].rtcpReceiver.ProcessFrame(stamp,
+						sc.announcedTracks[frame.TrackID].rtcpReceiver.ProcessFrame(stamp,
 							frame.StreamType, frame.Payload)
 					}
-          sc.readHandlers.OnFrame(frame.TrackID, frame.StreamType, frame.Payload, stamp)
+					sc.readHandlers.OnFrame(frame.TrackID, frame.StreamType, frame.Payload, stamp)
 				}
 
 			case *base.Request:
