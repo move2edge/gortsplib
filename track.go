@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+  "time"
 
 	psdp "github.com/pion/sdp/v3"
 
@@ -352,6 +353,8 @@ func ReadTracks(byts []byte, baseURL *base.URL) (Tracks, error) {
 
 // Write encodes tracks into SDP.
 func (ts Tracks) Write() []byte {
+  now := time.Now()
+  ms := now.UnixNano() / int64(time.Millisecond) - now.Unix()*1000
 	sout := &sdp.SessionDescription{
 		SessionName: psdp.SessionName("Stream"),
 		Origin: psdp.Origin{
@@ -394,6 +397,12 @@ func (ts Tracks) Write() []byte {
 					Key:   "control",
 					Value: "trackID=" + strconv.FormatInt(int64(i), 10),
 				})
+
+				ret = append(ret, psdp.Attribute{
+					Key:   "range",
+					Value: fmt.Sprintf("npt=%d.%d-", now.Unix(), ms),
+				})
+
 
 				return ret
 			}(),
