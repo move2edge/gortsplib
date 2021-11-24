@@ -282,6 +282,7 @@ type ServerConn struct {
 
 	// in
 	terminate chan struct{}
+	IsOld       bool
 }
 
 func newServerConn(conf ServerConf,

@@ -51,9 +51,9 @@ func newServer(conf ServerConf, address string) (*Server, error) {
 		conf.receiverReportPeriod = 10 * time.Second
 	}
 
-	if conf.TLSConfig != nil && conf.UDPRTPAddress != "" {
-		return nil, fmt.Errorf("TLS can't be used together with UDP")
-	}
+	//if conf.TLSConfig != nil && conf.UDPRTPAddress != "" {
+		//return nil, fmt.Errorf("TLS can't be used together with UDP")
+	//}
 
 	if (conf.UDPRTPAddress != "" && conf.UDPRTCPAddress == "") ||
 		(conf.UDPRTPAddress == "" && conf.UDPRTCPAddress != "") {
