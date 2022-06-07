@@ -283,6 +283,9 @@ type ServerConn struct {
 	// in
 	terminate chan struct{}
 	IsOld       bool
+	LastDelay       time.Duration
+	LastJitter       time.Duration
+	User       string
 }
 
 func newServerConn(conf ServerConf,
