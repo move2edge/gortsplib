@@ -805,13 +805,13 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 						InterleavedIDs: th.InterleavedIDs,
 					}.Write()
 				}
-			}
 
-			if sc.state == ServerConnStateInitial {
-				sc.state = ServerConnStatePrePlay
-				sc.setupPath = &path
-				sc.setupQuery = &query
-				sc.frameModeEnable()
+        if sc.state == ServerConnStateInitial {
+          sc.state = ServerConnStatePrePlay
+          sc.setupPath = &path
+          sc.setupQuery = &query
+          sc.frameModeEnable()
+        }
 			}
 
 			// workaround to prevent a bug in rtspclientsink
