@@ -7,9 +7,9 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
-	"sync"
 
 	"github.com/aler9/gortsplib/pkg/base"
 	"github.com/aler9/gortsplib/pkg/headers"
@@ -281,11 +281,15 @@ type ServerConn struct {
 	udpTimeout                int32
 
 	// in
-	terminate chan struct{}
-	IsOld       bool
-	LastDelay       time.Duration
-	LastJitter       time.Duration
+	terminate  chan struct{}
+	IsOld      bool
+	LastDelay  time.Duration
+	LastJitter time.Duration
 	User       string
+	IsSrtp     bool
+	IsCrypto   bool
+	CryptoAlg  string
+	CryptoKey  string
 }
 
 func newServerConn(conf ServerConf,
@@ -766,18 +770,18 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 				sc.setupProtocol = &th.Protocol
 
 				if sc.setuppedTracks == nil {
-          sc.trackMutex.Lock()
+					sc.trackMutex.Lock()
 					sc.setuppedTracks = make(map[int]ServerConnSetuppedTrack)
-          sc.trackMutex.Unlock()
+					sc.trackMutex.Unlock()
 				}
 
 				if th.Protocol == StreamProtocolUDP {
-          sc.trackMutex.Lock()
+					sc.trackMutex.Lock()
 					sc.setuppedTracks[trackID] = ServerConnSetuppedTrack{
 						udpRTPPort:  th.ClientPorts[0],
 						udpRTCPPort: th.ClientPorts[1],
 					}
-          sc.trackMutex.Unlock()
+					sc.trackMutex.Unlock()
 
 					if res.Header == nil {
 						res.Header = make(base.Header)
@@ -793,9 +797,9 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 					}.Write()
 
 				} else {
-          sc.trackMutex.Lock()
+					sc.trackMutex.Lock()
 					sc.setuppedTracks[trackID] = ServerConnSetuppedTrack{}
-          sc.trackMutex.Unlock()
+					sc.trackMutex.Unlock()
 
 					if res.Header == nil {
 						res.Header = make(base.Header)
@@ -806,12 +810,12 @@ func (sc *ServerConn) handleRequest(req *base.Request) (*base.Response, error) {
 					}.Write()
 				}
 
-        if sc.state == ServerConnStateInitial {
-          sc.state = ServerConnStatePrePlay
-          sc.setupPath = &path
-          sc.setupQuery = &query
-          sc.frameModeEnable()
-        }
+				if sc.state == ServerConnStateInitial {
+					sc.state = ServerConnStatePrePlay
+					sc.setupPath = &path
+					sc.setupQuery = &query
+					sc.frameModeEnable()
+				}
 			}
 
 			// workaround to prevent a bug in rtspclientsink

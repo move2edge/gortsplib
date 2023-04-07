@@ -110,7 +110,7 @@ func (h *Transport) Read(v base.HeaderValue) error {
 	}
 
 	switch part {
-	case "RTP/AVP", "RTP/AVP/UDP":
+  case "RTP/AVP", "RTP/AVP/UDP", "RTP/SAVP/UDP":
 		h.Protocol = base.StreamProtocolUDP
 
 	case "RTP/AVP/TCP":
