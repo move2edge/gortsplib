@@ -281,15 +281,17 @@ type ServerConn struct {
 	udpTimeout                int32
 
 	// in
-	terminate  chan struct{}
-	IsOld      bool
-	LastDelay  time.Duration
-	LastJitter time.Duration
-	User       string
-	IsSrtp     bool
-	IsCrypto   bool
-	CryptoAlg  string
-	CryptoKey  string
+	terminate   chan struct{}
+	IsOld       bool
+	LastDelay   time.Duration
+	LastJitter  time.Duration
+	User        string
+	IsSrtp      bool
+	IsCrypto    bool
+	CryptoAlg   string
+	CryptoKey   string
+	LastRtcpSeq uint32
+	RocSpinns   int
 }
 
 func newServerConn(conf ServerConf,
