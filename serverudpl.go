@@ -148,7 +148,7 @@ func (s *serverUDPListener) handleNat(n int, addr *net.UDPAddr, buf []byte) (*cl
 	} else if buf[1] == 224 {
 		clientData, err = s.updatePorts(true, s.streamType, addr)
 	} else {
-		log.Error(Red("Unknown type of frame, dropping connection"))
+    log.Error(Red("Unknown type of frame, dropping connection Port: "), addr.Port)
 		return nil, errors.New("Not found in matching")
 	}
 	return clientData, err
