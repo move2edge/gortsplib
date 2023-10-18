@@ -292,6 +292,7 @@ type ServerConn struct {
 	CryptoKey   string
 	LastRtcpSeq uint32
 	RocSpinns   int
+	Protocol    string
 }
 
 func newServerConn(conf ServerConf,
