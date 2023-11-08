@@ -293,6 +293,7 @@ type ServerConn struct {
 	LastRtcpSeq uint32
 	RocSpinns   int
 	Protocol    string
+	SSRC        uint32
 }
 
 func newServerConn(conf ServerConf,
@@ -1173,6 +1174,9 @@ func (sc *ServerConn) Read(readHandlers ServerConnReadHandlers) chan error {
 
 // WriteFrame writes a frame.
 func (sc *ServerConn) WriteFrame(trackID int, streamType StreamType, payload []byte) {
+	if sc == nil {
+		return
+	}
 	if *sc.setupProtocol == StreamProtocolUDP {
 		track := sc.setuppedTracks[trackID]
 

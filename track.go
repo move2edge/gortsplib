@@ -24,6 +24,10 @@ type Track struct {
 
 	// codec and info in SDP format
 	Media *psdp.MediaDescription
+
+	IsEncrypted bool
+
+	Crypto string
 }
 
 // NewTrackH264 initializes an H264 track from a SPS and PPS.
@@ -372,10 +376,14 @@ func (ts Tracks) Write() []byte {
 	}
 
 	for i, track := range ts {
+		proto := "AVP"
+		if track.Crypto != "" {
+			proto = "SAVP"
+		}
 		mout := &psdp.MediaDescription{
 			MediaName: psdp.MediaName{
 				Media:   track.Media.MediaName.Media,
-				Protos:  []string{"RTP", "AVP"}, // override protocol
+				Protos:  []string{"RTP", proto}, // override protocol
 				Formats: track.Media.MediaName.Formats,
 			},
 			Bandwidth: track.Media.Bandwidth,
@@ -394,6 +402,13 @@ func (ts Tracks) Write() []byte {
 					Key:   "control",
 					Value: "trackID=" + strconv.FormatInt(int64(i), 10),
 				})
+
+        if track.IsEncrypted {
+          ret = append(ret, psdp.Attribute{
+            Key:   "crypto",
+            Value: track.Crypto,
+          })
+        }
 
 				return ret
 			}(),

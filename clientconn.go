@@ -545,6 +545,7 @@ func (cc *ClientConn) Setup(mode headers.TransportMode, track *Track,
 			return &v
 		}(),
 		Mode: &mode,
+    Encrypted: track.IsEncrypted,
 	}
 
 	if proto == base.StreamProtocolUDP {

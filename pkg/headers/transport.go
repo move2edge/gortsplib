@@ -59,6 +59,9 @@ type Transport struct {
 
 	// (optional) mode
 	Mode *TransportMode
+
+	// (optional) interleaved frame ids
+	Encrypted bool
 }
 
 func parsePorts(val string) (*[2]int, error) {
@@ -222,7 +225,11 @@ func (h Transport) Write() base.HeaderValue {
 	var rets []string
 
 	if h.Protocol == base.StreamProtocolUDP {
-		rets = append(rets, "RTP/AVP")
+    if h.Encrypted {
+      rets = append(rets, "RTP/SAVP/UDP")
+    } else {
+      rets = append(rets, "RTP/AVP")
+    }
 	} else {
 		rets = append(rets, "RTP/AVP/TCP")
 	}
