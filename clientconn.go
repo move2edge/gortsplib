@@ -517,8 +517,8 @@ func (cc *ClientConn) Setup(mode headers.TransportMode, track *Track,
 	var rtpListener *clientConnUDPListener
 	var rtcpListener *clientConnUDPListener
 
-	// always use TCP if encrypted
-	if cc.isTLS {
+	// by default use TCP if encrypted
+	if cc.isTLS && cc.conf.StreamProtocol == nil {
 		v := StreamProtocolTCP
 		cc.streamProtocol = &v
 	}
