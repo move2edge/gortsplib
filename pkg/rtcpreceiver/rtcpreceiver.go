@@ -134,7 +134,7 @@ func (rr *RTCPReceiver) Report(ts time.Time) []byte {
 		SSRC: rr.receiverSSRC,
 		Reports: []rtcp.ReceptionReport{
 			{
-				SSRC:               rr.senderSSRC +1,
+				SSRC:               rr.senderSSRC + 2,
 				LastSequenceNumber: uint32(rr.sequenceNumberCycles)<<16 | uint32(rr.lastSequenceNumber),
 				LastSenderReport:   rr.lastSenderReport,
 				// equivalent to taking the integer part after multiplying the

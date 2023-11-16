@@ -67,7 +67,7 @@ func (rs *RTCPSender) Report(ts time.Time) []byte {
 	}
 
 	report := &rtcp.SenderReport{
-		SSRC: rs.senderSSRC+1,
+		SSRC: rs.senderSSRC+2,
 		NTPTime: func() uint64 {
 			// seconds since 1st January 1900
 			s := (float64(ts.UnixNano()) / 1000000000) + 2208988800
