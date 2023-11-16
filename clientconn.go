@@ -101,6 +101,8 @@ type ClientConn struct {
 
 	// out
 	backgroundDone chan struct{}
+
+  RelayDelay time.Duration
 }
 
 func newClientConn(conf ClientConf, scheme string, host string) (*ClientConn, error) {

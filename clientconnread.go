@@ -111,7 +111,7 @@ func (cc *ClientConn) backgroundPlayUDP() error {
 		case <-reportTicker.C:
 			now := time.Now()
 			for _, cct := range cc.tracks {
-				rr := cct.rtcpReceiver.Report(now)
+				rr := cct.rtcpReceiver.Report(now.Add(cc.RelayDelay))
 				cct.udpRTCPListener.write(rr)
 			}
 
@@ -238,7 +238,7 @@ func (cc *ClientConn) backgroundPlayTCP() error {
 		case <-reportTicker.C:
 			now := time.Now()
 			for trackID, cct := range cc.tracks {
-				r := cct.rtcpReceiver.Report(now)
+				r := cct.rtcpReceiver.Report(now.Add(cc.RelayDelay))
 				cc.nconn.SetWriteDeadline(time.Now().Add(cc.conf.WriteTimeout))
 				frame := base.InterleavedFrame{
 					TrackID:    trackID,
