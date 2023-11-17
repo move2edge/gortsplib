@@ -131,7 +131,7 @@ func (s *serverUDPListener) updatePorts(isPublisher bool, streamType StreamType,
 			return clientData, nil
 		}
 	}
-	log.Errorln("Not found in address table", addr)
+	log.Debugln("Not found in address table", addr)
 	return nil, errors.New("Not found in address table")
 }
 
