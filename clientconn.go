@@ -155,7 +155,10 @@ func newClientConn(conf ClientConf, scheme string, host string) (*ClientConn, er
 
 // Close closes all the ClientConn resources.
 func (cc *ClientConn) Close() error {
-	if cc!= nil && cc.backgroundRunning {
+  if cc == nil {
+    return nil
+  }
+	if cc.backgroundRunning {
 		close(cc.backgroundTerminate)
 		<-cc.backgroundDone
 	}
